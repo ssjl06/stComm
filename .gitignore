@@ -1,0 +1,39 @@
+# Build directories
+build/
+install/
+*.o
+*.so
+*.a
+
+# CMake files
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+Makefile
+
+# IDE files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Environment configuration (user-specific)
+env.sh
+
+# Test outputs
+Testing/
+*.log
+
+# CUDA compilation
+*.fatbin
+*.cubin
+*.ptx
+
+# Python cache
+__pycache__/
+*.pyc
+
+# Backup files
+*.bak
+*.backup
