@@ -6,6 +6,7 @@
 
 #include "stComm/types.h"
 #include "stComm/request.h"
+#include "stComm/utils.h"
 #include "stComm/mpi_comm.h"
 #include "stComm/nccl_comm.h"
 

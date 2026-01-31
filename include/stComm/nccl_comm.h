@@ -3,9 +3,11 @@
 
 #include "types.h"
 #include "request.h"
+#include "utils.h"
 #include <nccl.h>
 #include <cuda_runtime.h>
 #include <memory>
+#include <vector>
 #include <type_traits>
 
 namespace stComm {
@@ -59,6 +61,24 @@ public:
 
     template<typename T>
     RequestPtr alltoall(const T* sendbuf, T* recvbuf, size_t count, cudaStream_t stream = nullptr);
+
+    // Variable-length collectives (implemented via grouped operations)
+    template<typename T>
+    RequestPtr allgatherv(const T* sendbuf, size_t sendcount, T* recvbuf,
+                         const int* recvcounts, const int* displs, cudaStream_t stream = nullptr);
+
+    template<typename T>
+    RequestPtr allgatherv_auto(const T* sendbuf, size_t sendcount, T* recvbuf,
+                               const int* recvcounts, cudaStream_t stream = nullptr);
+
+    template<typename T>
+    RequestPtr alltoallv(const T* sendbuf, const int* sendcounts, const int* sdispls,
+                        T* recvbuf, const int* recvcounts, const int* rdispls,
+                        cudaStream_t stream = nullptr);
+
+    template<typename T>
+    RequestPtr alltoallv_auto(const T* sendbuf, const int* sendcounts,
+                              T* recvbuf, const int* recvcounts, cudaStream_t stream = nullptr);
 
     // Reduce operations
     template<typename T>
@@ -159,6 +179,94 @@ RequestPtr NCCLComm::allreduce(const T* sendbuf, T* recvbuf, size_t count,
     ncclAllReduce(sendbuf, recvbuf, count, nccl_type, op, comm_, use_stream);
 
     return req;
+}
+
+template<typename T>
+RequestPtr NCCLComm::allgatherv(const T* sendbuf, size_t sendcount, T* recvbuf,
+                                const int* recvcounts, const int* displs, cudaStream_t stream) {
+    if (!initialized_) {
+        return nullptr;
+    }
+
+    cudaStream_t use_stream = getOrCreateStream(stream);
+    auto req = std::make_shared<NCCLRequest>(use_stream);
+    ncclDataType_t nccl_type = NCCLTypeMap<T>::type();
+
+    // NCCL doesn't have native allgatherv, use grouped send/recv
+    ncclGroupStart();
+    for (int i = 0; i < size_; ++i) {
+        if (i == rank_) {
+            // Broadcast my data to all others
+            for (int j = 0; j < size_; ++j) {
+                if (j != rank_) {
+                    ncclSend(sendbuf, sendcount, nccl_type, j, comm_, use_stream);
+                }
+            }
+            // Copy my own data (can be done with cudaMemcpy or in-place)
+            if (recvbuf + displs[rank_] != sendbuf) {
+                cudaMemcpyAsync(recvbuf + displs[rank_], sendbuf, sendcount * sizeof(T),
+                               cudaMemcpyDeviceToDevice, use_stream);
+            }
+        } else {
+            // Receive from rank i
+            ncclRecv(recvbuf + displs[i], recvcounts[i], nccl_type, i, comm_, use_stream);
+        }
+    }
+    ncclGroupEnd();
+
+    return req;
+}
+
+template<typename T>
+RequestPtr NCCLComm::allgatherv_auto(const T* sendbuf, size_t sendcount, T* recvbuf,
+                                      const int* recvcounts, cudaStream_t stream) {
+    auto displs = Utils::calculate_displacements(recvcounts, size_);
+    return allgatherv(sendbuf, sendcount, recvbuf, recvcounts, displs.data(), stream);
+}
+
+template<typename T>
+RequestPtr NCCLComm::alltoallv(const T* sendbuf, const int* sendcounts, const int* sdispls,
+                               T* recvbuf, const int* recvcounts, const int* rdispls,
+                               cudaStream_t stream) {
+    if (!initialized_) {
+        return nullptr;
+    }
+
+    cudaStream_t use_stream = getOrCreateStream(stream);
+    auto req = std::make_shared<NCCLRequest>(use_stream);
+    ncclDataType_t nccl_type = NCCLTypeMap<T>::type();
+
+    // NCCL doesn't have native alltoallv, use grouped send/recv
+    ncclGroupStart();
+    for (int i = 0; i < size_; ++i) {
+        if (i != rank_) {
+            if (sendcounts[i] > 0) {
+                ncclSend(sendbuf + sdispls[i], sendcounts[i], nccl_type, i, comm_, use_stream);
+            }
+            if (recvcounts[i] > 0) {
+                ncclRecv(recvbuf + rdispls[i], recvcounts[i], nccl_type, i, comm_, use_stream);
+            }
+        } else {
+            // Self-copy for same rank
+            if (sendcounts[rank_] > 0 && (recvbuf + rdispls[rank_] != sendbuf + sdispls[rank_])) {
+                cudaMemcpyAsync(recvbuf + rdispls[rank_], sendbuf + sdispls[rank_],
+                               sendcounts[rank_] * sizeof(T),
+                               cudaMemcpyDeviceToDevice, use_stream);
+            }
+        }
+    }
+    ncclGroupEnd();
+
+    return req;
+}
+
+template<typename T>
+RequestPtr NCCLComm::alltoallv_auto(const T* sendbuf, const int* sendcounts,
+                                     T* recvbuf, const int* recvcounts, cudaStream_t stream) {
+    auto sdispls = Utils::calculate_displacements(sendcounts, size_);
+    auto rdispls = Utils::calculate_displacements(recvcounts, size_);
+    return alltoallv(sendbuf, sendcounts, sdispls.data(),
+                     recvbuf, recvcounts, rdispls.data(), stream);
 }
 
 } // namespace stComm

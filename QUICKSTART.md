@@ -1,5 +1,41 @@
 # stComm Quick Start Guide
 
+## What Makes stComm Easy to Use?
+
+stComm provides **high-level APIs** that eliminate manual work:
+
+- ✅ **Auto displacement calculation** - No more manual offset math
+- ✅ **Vector-based APIs** - Return results directly, no buffer management
+- ✅ **Template-based** - Works with any primitive type
+- ✅ **Async by default** - Non-blocking operations for better performance
+
+### Quick Comparison
+
+**Traditional MPI (allgatherv with variable lengths):**
+```cpp
+// Manual displacement calculation - tedious!
+int displs[size];
+displs[0] = 0;
+for (int i = 1; i < size; ++i) {
+    displs[i] = displs[i-1] + recvcounts[i-1];
+}
+MPI_Iallgatherv(sendbuf, sendcount, MPI_BYTE,
+                recvbuf, recvcounts, displs, MPI_BYTE,
+                comm, &req);
+```
+
+**stComm (auto displacement):**
+```cpp
+// Displacement calculated automatically!
+auto req = comm.allgatherv_auto(sendbuf, sendcount, recvbuf, recvcounts);
+```
+
+**stComm (vector API - even simpler):**
+```cpp
+// One line! Returns result directly
+auto result = comm.allgatherv_vec(sendbuf, recvcounts);
+```
+
 ## 1. Setup Environment (First Time Only)
 
 Edit `env.sh` to configure paths for your system:
@@ -33,8 +69,28 @@ Set the following paths:
 Build outputs:
 - Shared library: `build/lib/libstComm.so`
 - Test executable: `build/tests/stComm_tests`
+- Example binary: `build/examples/simple_usage`
 
-## 3. Run Tests
+## 3. Try Examples (Recommended!)
+
+Run the comprehensive example showing all high-level APIs:
+
+```bash
+# Load environment
+source env.sh
+
+# Run with 4 MPI processes
+mpirun -np 4 ./build/examples/simple_usage
+```
+
+This example demonstrates:
+- `allgather_vec()` - Simple gathering with equal counts
+- `allgatherv_auto()` - Variable-length gather with auto displacement
+- `allgatherv_vec()` - Vector-based variable-length gather
+- `alltoallv_auto()` - Personalized exchange with auto displacement
+- `alltoallv_vec()` - Vector-based personalized exchange
+
+## 4. Run Tests
 
 ```bash
 # Run with 2 MPI processes
@@ -47,7 +103,7 @@ Build outputs:
 ./run_tests.sh -f "MPICommTest.SendRecv*"
 ```
 
-## 4. Use in Your Code
+## 5. Use in Your Code
 
 ### Simple MPI Example
 
@@ -192,29 +248,113 @@ nvcc -std=c++17 example_nccl.cpp \
 mpirun -np 2 ./example_nccl
 ```
 
-## 5. API Overview
+## 6. API Overview
 
 ### Core Classes
 
 - **MPIComm**: MPI-based communication (CPU)
-  - `send<T>()`, `recv<T>()`: Point-to-point
-  - `allgatherv<T>()`, `alltoallv<T>()`: Collectives
+  - **Point-to-point**: `send<T>()`, `recv<T>()`
+  - **Collectives (low-level)**: `allgatherv<T>()`, `alltoallv<T>()`
+  - **Collectives (auto)**: `allgatherv_auto<T>()`, `alltoallv_auto<T>()` - **No manual displacement!**
+  - **Collectives (vector)**: `allgatherv_vec<T>()`, `alltoallv_vec<T>()` - **Returns result directly!**
+  - **Simple collectives**: `allgather<T>()`, `allgather_vec<T>()`, `allreduce<T>()`
 
 - **NCCLComm**: NCCL-based communication (GPU)
-  - `send<T>()`, `recv<T>()`: Point-to-point
-  - `allgather<T>()`, `allreduce<T>()`: Collectives
+  - **Point-to-point**: `send<T>()`, `recv<T>()`
+  - **Collectives (low-level)**: `allgatherv<T>()`, `alltoallv<T>()`
+  - **Collectives (auto)**: `allgatherv_auto<T>()`, `alltoallv_auto<T>()` - **No manual displacement!**
+  - **Simple collectives**: `allgather<T>()`, `allreduce<T>()`
 
 - **Request**: Async operation handle
   - `wait()`: Block until complete
   - `test()`: Check completion
 
+- **Utils**: Helper functions
+  - `calculate_displacements()`: Auto displacement calculation
+  - `total_size()`: Calculate total buffer size from counts
+  - `CommBuffer<T>`: RAII buffer management
+
+### Three Levels of API
+
+**1. Vector API (Easiest)** - For maximum convenience
+```cpp
+// Returns result, handles everything
+auto result = comm.allgatherv_vec(sendbuf, recvcounts);
+auto result = comm.alltoallv_vec(sendbuf, sendcounts, recvcounts);
+```
+
+**2. Auto API (Medium)** - Auto displacement, you manage buffers
+```cpp
+// No manual displacement calculation needed
+comm.allgatherv_auto(sendbuf, count, recvbuf, recvcounts);
+comm.alltoallv_auto(sendbuf, sendcounts, recvbuf, recvcounts);
+```
+
+**3. Low-level API (Full control)** - When you need maximum performance
+```cpp
+// Full control, manual displacement
+comm.allgatherv(sendbuf, count, recvbuf, recvcounts, displs);
+comm.alltoallv(sendbuf, sendcounts, sdispls, recvbuf, recvcounts, rdispls);
+```
+
 ### Supported Types
 
-All primitive types: `int8_t`, `int16_t`, `int32_t`, `int64_t`, `uint8_t`, `uint16_t`, `uint32_t`, `uint64_t`, `float`, `double`, etc.
+All primitive types: `int8_t`, `int16_t`, `int32_t`, `int64_t`, `uint8_t`, `uint16_t`, `uint32_t`, `uint64_t`, `float`, `double`, `char`, `int`, `long`, etc.
 
-## 6. Common Patterns
+## 7. Common Patterns
 
-### Pattern 1: Async Send/Recv with Overlap
+### Pattern 1: Variable-Length Gather (High-Level API)
+
+```cpp
+// Each rank has different amount of data
+std::vector<int> my_data(rank + 1);
+for (size_t i = 0; i < my_data.size(); ++i) {
+    my_data[i] = rank * 100 + i;
+}
+
+// Define how much each rank sends
+std::vector<int> recvcounts(size);
+for (int i = 0; i < size; ++i) {
+    recvcounts[i] = i + 1;
+}
+
+// Option 1: Vector API (easiest!)
+auto result = comm.allgatherv_vec(my_data, recvcounts);
+// Done! result contains all gathered data
+
+// Option 2: Auto API (if you need buffer control)
+int total = stComm::Utils::total_size(recvcounts);
+std::vector<int> recvbuf(total);
+auto req = comm.allgatherv_auto(my_data.data(), my_data.size(),
+                                recvbuf.data(), recvcounts.data());
+req->wait();
+```
+
+### Pattern 2: Personalized All-to-All (High-Level API)
+
+```cpp
+// Each rank sends different amounts to each other rank
+std::vector<int> sendcounts(size);
+std::vector<int> recvcounts(size);
+for (int i = 0; i < size; ++i) {
+    sendcounts[i] = rank + 1;  // Send (rank+1) items to each rank
+    recvcounts[i] = i + 1;     // Receive (i+1) items from rank i
+}
+
+std::vector<int> sendbuf(stComm::Utils::total_size(sendcounts));
+// Fill sendbuf...
+
+// Option 1: Vector API (easiest!)
+auto result = comm.alltoallv_vec(sendbuf, sendcounts, recvcounts);
+
+// Option 2: Auto API
+std::vector<int> recvbuf(stComm::Utils::total_size(recvcounts));
+auto req = comm.alltoallv_auto(sendbuf.data(), sendcounts.data(),
+                               recvbuf.data(), recvcounts.data());
+req->wait();
+```
+
+### Pattern 3: Async Send/Recv with Overlap
 
 ```cpp
 auto req = comm.send(data, count, dest);
@@ -224,7 +364,7 @@ compute_something_else();
 req->wait();
 ```
 
-### Pattern 2: Multiple Concurrent Operations
+### Pattern 4: Multiple Concurrent Operations
 
 ```cpp
 std::vector<stComm::RequestPtr> requests;
@@ -240,36 +380,25 @@ for (auto& req : requests) {
 }
 ```
 
-### Pattern 3: Variable-Size Allgatherv
+### Pattern 5: Using Utility Functions
 
 ```cpp
-std::vector<int> sendcounts(size);
-std::vector<int> displs(size);
+// Calculate displacements automatically
+std::vector<int> counts = {10, 20, 30, 40};
+auto displs = stComm::Utils::calculate_displacements(counts);
+// Result: [0, 10, 30, 60]
 
-// Each rank has different data size
-int my_count = 100 + rank * 10;
+// Calculate total buffer size
+int total = stComm::Utils::total_size(counts);
+// Result: 100
 
-// Gather sizes
-MPI_Allgather(&my_count, 1, MPI_INT,
-              sendcounts.data(), 1, MPI_INT, MPI_COMM_WORLD);
-
-// Calculate displacements
-displs[0] = 0;
-for (int i = 1; i < size; ++i) {
-    displs[i] = displs[i-1] + sendcounts[i-1];
-}
-
-// Allgatherv
-std::vector<double> sendbuf(my_count);
-std::vector<double> recvbuf(displs[size-1] + sendcounts[size-1]);
-
-auto req = comm.allgatherv(sendbuf.data(), my_count,
-                           recvbuf.data(),
-                           sendcounts.data(), displs.data());
-req->wait();
+// RAII buffer management
+stComm::CommBuffer<double> buffer(counts);
+// buffer.data() ready to use
+// Automatically freed when out of scope
 ```
 
-## 7. Troubleshooting
+## 8. Troubleshooting
 
 ### Build fails with "NCCL not found"
 ```bash
