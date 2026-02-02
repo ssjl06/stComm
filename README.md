@@ -174,16 +174,12 @@ int main(int argc, char** argv) {
     std::vector<float> h_data(N, rank * 1.0f);
     cudaMemcpy(d_data, h_data.data(), N * sizeof(float), cudaMemcpyHostToDevice);
 
-    // Create CUDA stream
-    cudaStream_t stream;
-    cudaStreamCreate(&stream);
-
-    // Async send on GPU
+    // Async send on GPU (uses internal CUDA stream)
     if (rank == 0) {
-        auto req = nccl_comm.send(d_data, N, 1, stream);
+        auto req = nccl_comm.send(d_data, N, 1);
         req->wait();
     } else if (rank == 1) {
-        auto req = nccl_comm.recv(d_data, N, 0, stream);
+        auto req = nccl_comm.recv(d_data, N, 0);
         req->wait();
     }
 
@@ -199,16 +195,15 @@ int main(int argc, char** argv) {
     cudaMalloc(&d_sendbuf, my_count * sizeof(float));
     cudaMalloc(&d_recvbuf, total_recv * sizeof(float));
 
-    // Displacement auto-calculated!
+    // Displacement auto-calculated! Uses internal stream for async operations
     auto req = nccl_comm.allgatherv(d_sendbuf, my_count,
-                                    d_recvbuf, recvcounts.data(), stream);
+                                    d_recvbuf, recvcounts.data());
     req->wait();
 
     // Cleanup
     cudaFree(d_data);
     cudaFree(d_sendbuf);
     cudaFree(d_recvbuf);
-    cudaStreamDestroy(stream);
 
     stComm::MPIComm::finalize();
     return 0;
@@ -238,13 +233,15 @@ int main(int argc, char** argv) {
 - `getUniqueId()`: Get NCCL unique ID (call on rank 0)
 
 **Instance Methods:**
-- `initialize(rank, nranks, device_id, comm_id)`: Initialize NCCL
+- `initialize(rank, nranks, device_id, comm_id)`: Initialize NCCL (creates internal CUDA stream)
 - `int getRank()`: Get process rank
 - `int getSize()`: Get total processes
-- `send<T>(data, count, dest, stream)`: Async send on GPU
-- `recv<T>(data, count, source, stream)`: Async receive on GPU
-- `allgatherv<T>(sendbuf, sendcount, recvbuf, recvcounts, stream)`: Variable-length allgather (auto displacement)
-- `alltoallv<T>(sendbuf, sendcounts, recvbuf, recvcounts, stream)`: Variable-length alltoall (auto displacement)
+- `send<T>(data, count, dest)`: Async send on GPU (uses internal stream)
+- `recv<T>(data, count, source)`: Async receive on GPU (uses internal stream)
+- `allgatherv<T>(sendbuf, sendcount, recvbuf, recvcounts)`: Variable-length allgather (auto displacement, uses internal stream)
+- `alltoallv<T>(sendbuf, sendcounts, recvbuf, recvcounts)`: Variable-length alltoall (auto displacement, uses internal stream)
+
+**Note:** NCCLComm manages an internal CUDA stream created during initialization. All operations use this stream automatically for async execution.
 
 ### Utils
 

@@ -51,22 +51,22 @@ public:
     void barrier() override;
 
     // Point-to-point communication (async, device memory)
+    // Uses internal CUDA stream created during initialization
     template<typename T>
-    RequestPtr send(const T* data, size_t count, int dest, cudaStream_t stream = nullptr);
+    RequestPtr send(const T* data, size_t count, int dest);
 
     template<typename T>
-    RequestPtr recv(T* data, size_t count, int source, cudaStream_t stream = nullptr);
+    RequestPtr recv(T* data, size_t count, int source);
 
     // Collective communication - with auto displacement (device memory)
+    // Uses internal CUDA stream created during initialization
     template<typename T>
     RequestPtr allgatherv(const T* sendbuf, int sendcount,
-                         T* recvbuf, const int* recvcounts,
-                         cudaStream_t stream = nullptr);
+                         T* recvbuf, const int* recvcounts);
 
     template<typename T>
     RequestPtr alltoallv(const T* sendbuf, const int* sendcounts,
-                        T* recvbuf, const int* recvcounts,
-                        cudaStream_t stream = nullptr);
+                        T* recvbuf, const int* recvcounts);
 
     // Get native handle
     ncclComm_t getHandle() const { return comm_; }
@@ -77,9 +77,7 @@ private:
     int size_;
     int device_id_;
     bool initialized_;
-    cudaStream_t default_stream_;
-
-    cudaStream_t getOrCreateStream(cudaStream_t stream);
+    cudaStream_t stream_;  // Internal CUDA stream for all operations
 };
 
 // ============================================================================
@@ -87,45 +85,41 @@ private:
 // ============================================================================
 
 template<typename T>
-RequestPtr NCCLComm::send(const T* data, size_t count, int dest, cudaStream_t stream) {
+RequestPtr NCCLComm::send(const T* data, size_t count, int dest) {
     if (!initialized_) {
         return nullptr;
     }
 
-    cudaStream_t use_stream = getOrCreateStream(stream);
-    auto req = std::make_shared<NCCLRequest>(use_stream);
+    auto req = std::make_shared<NCCLRequest>(stream_);
 
     ncclDataType_t nccl_type = NCCLTypeMap<T>::type();
-    ncclSend(data, count, nccl_type, dest, comm_, use_stream);
+    ncclSend(data, count, nccl_type, dest, comm_, stream_);
 
     return req;
 }
 
 template<typename T>
-RequestPtr NCCLComm::recv(T* data, size_t count, int source, cudaStream_t stream) {
+RequestPtr NCCLComm::recv(T* data, size_t count, int source) {
     if (!initialized_) {
         return nullptr;
     }
 
-    cudaStream_t use_stream = getOrCreateStream(stream);
-    auto req = std::make_shared<NCCLRequest>(use_stream);
+    auto req = std::make_shared<NCCLRequest>(stream_);
 
     ncclDataType_t nccl_type = NCCLTypeMap<T>::type();
-    ncclRecv(data, count, nccl_type, source, comm_, use_stream);
+    ncclRecv(data, count, nccl_type, source, comm_, stream_);
 
     return req;
 }
 
 template<typename T>
 RequestPtr NCCLComm::allgatherv(const T* sendbuf, int sendcount,
-                                T* recvbuf, const int* recvcounts,
-                                cudaStream_t stream) {
+                                T* recvbuf, const int* recvcounts) {
     if (!initialized_) {
         return nullptr;
     }
 
-    cudaStream_t use_stream = getOrCreateStream(stream);
-    auto req = std::make_shared<NCCLRequest>(use_stream);
+    auto req = std::make_shared<NCCLRequest>(stream_);
 
     // Auto-calculate displacements
     auto displs = Utils::calculateDisplacements(recvcounts, size_);
@@ -139,17 +133,17 @@ RequestPtr NCCLComm::allgatherv(const T* sendbuf, int sendcount,
             // Broadcast my data to all others
             for (int j = 0; j < size_; ++j) {
                 if (j != rank_) {
-                    ncclSend(sendbuf, sendcount, nccl_type, j, comm_, use_stream);
+                    ncclSend(sendbuf, sendcount, nccl_type, j, comm_, stream_);
                 }
             }
             // Copy my own data
             if (recvbuf + displs[rank_] != sendbuf) {
                 cudaMemcpyAsync(recvbuf + displs[rank_], sendbuf, sendcount * sizeof(T),
-                               cudaMemcpyDeviceToDevice, use_stream);
+                               cudaMemcpyDeviceToDevice, stream_);
             }
         } else {
             // Receive from rank i
-            ncclRecv(recvbuf + displs[i], recvcounts[i], nccl_type, i, comm_, use_stream);
+            ncclRecv(recvbuf + displs[i], recvcounts[i], nccl_type, i, comm_, stream_);
         }
     }
     ncclGroupEnd();
@@ -159,14 +153,12 @@ RequestPtr NCCLComm::allgatherv(const T* sendbuf, int sendcount,
 
 template<typename T>
 RequestPtr NCCLComm::alltoallv(const T* sendbuf, const int* sendcounts,
-                               T* recvbuf, const int* recvcounts,
-                               cudaStream_t stream) {
+                               T* recvbuf, const int* recvcounts) {
     if (!initialized_) {
         return nullptr;
     }
 
-    cudaStream_t use_stream = getOrCreateStream(stream);
-    auto req = std::make_shared<NCCLRequest>(use_stream);
+    auto req = std::make_shared<NCCLRequest>(stream_);
 
     // Auto-calculate displacements
     auto sdispls = Utils::calculateDisplacements(sendcounts, size_);
@@ -179,17 +171,17 @@ RequestPtr NCCLComm::alltoallv(const T* sendbuf, const int* sendcounts,
     for (int i = 0; i < size_; ++i) {
         if (i != rank_) {
             if (sendcounts[i] > 0) {
-                ncclSend(sendbuf + sdispls[i], sendcounts[i], nccl_type, i, comm_, use_stream);
+                ncclSend(sendbuf + sdispls[i], sendcounts[i], nccl_type, i, comm_, stream_);
             }
             if (recvcounts[i] > 0) {
-                ncclRecv(recvbuf + rdispls[i], recvcounts[i], nccl_type, i, comm_, use_stream);
+                ncclRecv(recvbuf + rdispls[i], recvcounts[i], nccl_type, i, comm_, stream_);
             }
         } else {
             // Self-copy
             if (sendcounts[rank_] > 0 && (recvbuf + rdispls[rank_] != sendbuf + sdispls[rank_])) {
                 cudaMemcpyAsync(recvbuf + rdispls[rank_], sendbuf + sdispls[rank_],
                                sendcounts[rank_] * sizeof(T),
-                               cudaMemcpyDeviceToDevice, use_stream);
+                               cudaMemcpyDeviceToDevice, stream_);
             }
         }
     }

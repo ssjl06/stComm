@@ -24,17 +24,14 @@ protected:
         }
         MPI_Bcast(&nccl_id, sizeof(nccl_id), MPI_BYTE, 0, MPI_COMM_WORLD);
 
-        // Initialize NCCL communicator
+        // Initialize NCCL communicator (creates internal CUDA stream)
         nccl_comm = std::make_unique<stComm::NCCLComm>();
         nccl_comm->initialize(rank, size, device_id, nccl_id);
 
-        // Create CUDA stream
         cudaSetDevice(device_id);
-        cudaStreamCreate(&stream);
     }
 
     void TearDown() override {
-        cudaStreamDestroy(stream);
         nccl_comm.reset();
         mpi_comm.reset();
     }
@@ -44,7 +41,6 @@ protected:
     int rank;
     int size;
     int device_id;
-    cudaStream_t stream;
 };
 
 // Test basic properties
@@ -72,10 +68,10 @@ TEST_F(NCCLCommTest, SendRecv) {
         }
         cudaMemcpy(d_data, h_data.data(), N * sizeof(float), cudaMemcpyHostToDevice);
 
-        auto req = nccl_comm->send(d_data, N, 1, stream);
+        auto req = nccl_comm->send(d_data, N, 1);
         req->wait();
     } else if (rank == 1) {
-        auto req = nccl_comm->recv(d_data, N, 0, stream);
+        auto req = nccl_comm->recv(d_data, N, 0);
         req->wait();
 
         std::vector<float> h_data(N);
@@ -110,8 +106,8 @@ TEST_F(NCCLCommTest, Allgatherv) {
     std::vector<int> h_sendbuf(sendcount, rank * 100);
     cudaMemcpy(d_sendbuf, h_sendbuf.data(), sendcount * sizeof(int), cudaMemcpyHostToDevice);
 
-    // Call allgatherv (displacement auto-calculated)
-    auto req = nccl_comm->allgatherv(d_sendbuf, sendcount, d_recvbuf, recvcounts.data(), stream);
+    // Call allgatherv (displacement auto-calculated, uses internal stream)
+    auto req = nccl_comm->allgatherv(d_sendbuf, sendcount, d_recvbuf, recvcounts.data());
     req->wait();
 
     // Verify data
@@ -153,9 +149,9 @@ TEST_F(NCCLCommTest, Alltoallv) {
     }
     cudaMemcpy(d_sendbuf, h_sendbuf.data(), total_send * sizeof(int), cudaMemcpyHostToDevice);
 
-    // Call alltoallv (displacement auto-calculated)
+    // Call alltoallv (displacement auto-calculated, uses internal stream)
     auto req = nccl_comm->alltoallv(d_sendbuf, sendcounts.data(),
-                                    d_recvbuf, recvcounts.data(), stream);
+                                    d_recvbuf, recvcounts.data());
     req->wait();
 
     // Verify received data
@@ -188,7 +184,7 @@ TEST_F(NCCLCommTest, AsyncOperations) {
         std::vector<int> h_data(N, rank);
         cudaMemcpy(d_data, h_data.data(), N * sizeof(int), cudaMemcpyHostToDevice);
 
-        auto req = nccl_comm->send(d_data, N, 1, stream);
+        auto req = nccl_comm->send(d_data, N, 1);
 
         // Check if operation is pending
         bool is_complete = req->test();
@@ -197,7 +193,7 @@ TEST_F(NCCLCommTest, AsyncOperations) {
         req->wait();
         EXPECT_EQ(req->getStatus(), stComm::Status::SUCCESS);
     } else if (rank == 1) {
-        auto req = nccl_comm->recv(d_data, N, 0, stream);
+        auto req = nccl_comm->recv(d_data, N, 0);
 
         // Wait for completion
         req->wait();
