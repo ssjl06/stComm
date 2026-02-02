@@ -12,6 +12,7 @@ enable_testing()
 
 # Test source files
 set(TEST_SOURCES
+    main.cpp
     test_mpi_comm.cpp
     test_nccl_comm.cpp
 )
@@ -24,7 +25,6 @@ target_link_libraries(stComm_tests
     PRIVATE
         stComm
         GTest::gtest
-        GTest::gtest_main
         MPI::MPI_CXX
         CUDA::cudart
 )

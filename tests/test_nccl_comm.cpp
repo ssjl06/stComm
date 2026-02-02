@@ -187,7 +187,7 @@ TEST_F(NCCLCommTest, AsyncOperations) {
         auto req = nccl_comm->send(d_data, N, 1);
 
         // Check if operation is pending
-        bool is_complete = req->test();
+        req->test();  // Test non-blocking check
 
         // Wait for completion
         req->wait();
@@ -208,14 +208,4 @@ TEST_F(NCCLCommTest, AsyncOperations) {
     }
 
     cudaFree(d_data);
-}
-
-int main(int argc, char** argv) {
-    ::testing::InitGoogleTest(&argc, argv);
-    stComm::MPIComm::initialize(&argc, &argv);
-
-    int result = RUN_ALL_TESTS();
-
-    stComm::MPIComm::finalize();
-    return result;
 }
