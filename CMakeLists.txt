@@ -29,14 +29,19 @@ find_package(CUDAToolkit REQUIRED)
 # Find NCCL
 if(DEFINED ENV{NCCL_HOME})
     set(NCCL_INCLUDE_DIR "$ENV{NCCL_HOME}/include")
-    set(NCCL_LIBRARY "$ENV{NCCL_HOME}/lib/libnccl.so")
+    # Try both lib and lib64
+    find_library(NCCL_LIBRARY
+        NAMES nccl
+        PATHS "$ENV{NCCL_HOME}/lib" "$ENV{NCCL_HOME}/lib64"
+        NO_DEFAULT_PATH
+    )
 else()
     find_path(NCCL_INCLUDE_DIR NAMES nccl.h)
     find_library(NCCL_LIBRARY NAMES nccl)
 endif()
 
 if(NOT NCCL_INCLUDE_DIR OR NOT NCCL_LIBRARY)
-    message(FATAL_ERROR "NCCL not found. Set NCCL_HOME environment variable.")
+    message(FATAL_ERROR "NCCL not found. Set NCCL_HOME environment variable or ensure NCCL is in system path.")
 endif()
 
 message(STATUS "Found NCCL: ${NCCL_LIBRARY}")

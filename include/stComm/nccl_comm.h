@@ -17,9 +17,11 @@ struct NCCLTypeMap {
     static ncclDataType_t type();
 };
 
-// Specializations
+// Specializations for fixed-size types
 template<> inline ncclDataType_t NCCLTypeMap<int8_t>::type() { return ncclInt8; }
 template<> inline ncclDataType_t NCCLTypeMap<uint8_t>::type() { return ncclUint8; }
+template<> inline ncclDataType_t NCCLTypeMap<int16_t>::type() { return ncclInt32; }  // NCCL doesn't have int16, use int32
+template<> inline ncclDataType_t NCCLTypeMap<uint16_t>::type() { return ncclUint32; }  // NCCL doesn't have uint16, use uint32
 template<> inline ncclDataType_t NCCLTypeMap<int32_t>::type() { return ncclInt32; }
 template<> inline ncclDataType_t NCCLTypeMap<uint32_t>::type() { return ncclUint32; }
 template<> inline ncclDataType_t NCCLTypeMap<int64_t>::type() { return ncclInt64; }
@@ -27,7 +29,8 @@ template<> inline ncclDataType_t NCCLTypeMap<uint64_t>::type() { return ncclUint
 template<> inline ncclDataType_t NCCLTypeMap<float>::type() { return ncclFloat32; }
 template<> inline ncclDataType_t NCCLTypeMap<double>::type() { return ncclFloat64; }
 template<> inline ncclDataType_t NCCLTypeMap<char>::type() { return ncclInt8; }
-template<> inline ncclDataType_t NCCLTypeMap<int>::type() { return ncclInt32; }
+template<> inline ncclDataType_t NCCLTypeMap<signed char>::type() { return ncclInt8; }
+template<> inline ncclDataType_t NCCLTypeMap<unsigned char>::type() { return ncclUint8; }
 
 /**
  * @brief NCCL-based communication backend for GPU
