@@ -174,14 +174,18 @@ int main(int argc, char** argv) {
     std::vector<float> h_data(N, rank * 1.0f);
     cudaMemcpy(d_data, h_data.data(), N * sizeof(float), cudaMemcpyHostToDevice);
 
-    // Async send on GPU (uses internal CUDA stream)
-    if (rank == 0) {
-        auto req = nccl_comm.send(d_data, N, 1);
-        req->wait();
-    } else if (rank == 1) {
-        auto req = nccl_comm.recv(d_data, N, 0);
-        req->wait();
-    }
+    // Point-to-point communication (use groupStart/groupEnd for multiple operations)
+    // Ring communication pattern: everyone participates
+    int send_to = (rank + 1) % size;
+    int recv_from = (rank - 1 + size) % size;
+
+    nccl_comm.groupStart();  // Important: group operations to prevent deadlock
+    auto send_req = nccl_comm.send(d_data, N, send_to);
+    auto recv_req = nccl_comm.recv(d_data, N, recv_from);
+    nccl_comm.groupEnd();
+
+    send_req->wait();
+    recv_req->wait();
 
     // Allgatherv with auto displacement
     std::vector<int> recvcounts(size);

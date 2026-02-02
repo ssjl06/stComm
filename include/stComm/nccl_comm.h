@@ -51,11 +51,16 @@ public:
 
     // Point-to-point communication (async, device memory)
     // Uses internal CUDA stream created during initialization
+    // Note: For multiple send/recv, use groupStart/groupEnd for better performance
     template<typename T>
     RequestPtr send(const T* data, size_t count, int dest);
 
     template<typename T>
     RequestPtr recv(T* data, size_t count, int source);
+
+    // Group management for batching multiple operations
+    void groupStart();
+    void groupEnd();
 
     // Collective communication - with auto displacement (device memory)
     // Uses internal CUDA stream created during initialization

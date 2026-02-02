@@ -47,4 +47,12 @@ void NCCLComm::barrier() {
     }
 }
 
+void NCCLComm::groupStart() {
+    ncclGroupStart();
+}
+
+void NCCLComm::groupEnd() {
+    ncclGroupEnd();
+}
+
 } // namespace stComm

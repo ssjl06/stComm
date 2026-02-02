@@ -73,8 +73,11 @@ TEST_F(NCCLCommTest, SendRecv) {
     int send_to = (rank + 1) % size;
     int recv_from = (rank - 1 + size) % size;
 
+    // Group send and recv together to prevent deadlock
+    nccl_comm->groupStart();
     auto send_req = nccl_comm->send(d_send_data, N, send_to);
     auto recv_req = nccl_comm->recv(d_recv_data, N, recv_from);
+    nccl_comm->groupEnd();
 
     send_req->wait();
     recv_req->wait();
@@ -196,8 +199,11 @@ TEST_F(NCCLCommTest, AsyncOperations) {
     int send_to = (rank + 1) % size;
     int recv_from = (rank - 1 + size) % size;
 
+    // Group send and recv together to prevent deadlock
+    nccl_comm->groupStart();
     auto send_req = nccl_comm->send(d_send_data, N, send_to);
     auto recv_req = nccl_comm->recv(d_recv_data, N, recv_from);
+    nccl_comm->groupEnd();
 
     // Test non-blocking check
     send_req->test();
