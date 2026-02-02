@@ -1,5 +1,4 @@
-#ifndef STCOMM_TYPES_H
-#define STCOMM_TYPES_H
+#pragma once
 
 #include <cstdint>
 #include <memory>
@@ -28,5 +27,3 @@ class Request;
 using RequestPtr = std::shared_ptr<Request>;
 
 } // namespace stComm
-
-#endif // STCOMM_TYPES_H

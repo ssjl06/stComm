@@ -1,5 +1,4 @@
-#ifndef STCOMM_REQUEST_H
-#define STCOMM_REQUEST_H
+#pragma once
 
 #include "types.h"
 #include <mpi.h>
@@ -111,5 +110,3 @@ private:
 };
 
 } // namespace stComm
-
-#endif // STCOMM_REQUEST_H

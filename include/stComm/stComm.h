@@ -1,5 +1,4 @@
-#ifndef STCOMM_H
-#define STCOMM_H
+#pragma once
 
 /**
  * @file stComm.h
@@ -27,5 +26,3 @@ inline const char* getVersion() {
 }
 
 } // namespace stComm
-
-#endif // STCOMM_H

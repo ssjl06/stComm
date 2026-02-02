@@ -1,5 +1,4 @@
-#ifndef STCOMM_MPI_COMM_H
-#define STCOMM_MPI_COMM_H
+#pragma once
 
 #include "comm_base.h"
 #include "utils.h"
@@ -146,5 +145,3 @@ RequestPtr MPIComm::alltoallv(const T* sendbuf, const int* sendcounts,
 }
 
 } // namespace stComm
-
-#endif // STCOMM_MPI_COMM_H

@@ -1,5 +1,4 @@
-#ifndef STCOMM_COMM_BASE_H
-#define STCOMM_COMM_BASE_H
+#pragma once
 
 #include "types.h"
 #include "request.h"
@@ -59,5 +58,3 @@ protected:
 };
 
 } // namespace stComm
-
-#endif // STCOMM_COMM_BASE_H

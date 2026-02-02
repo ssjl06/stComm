@@ -1,5 +1,4 @@
-#ifndef STCOMM_NCCL_COMM_H
-#define STCOMM_NCCL_COMM_H
+#pragma once
 
 #include "comm_base.h"
 #include "utils.h"
@@ -191,5 +190,3 @@ RequestPtr NCCLComm::alltoallv(const T* sendbuf, const int* sendcounts,
 }
 
 } // namespace stComm
-
-#endif // STCOMM_NCCL_COMM_H

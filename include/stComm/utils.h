@@ -1,5 +1,4 @@
-#ifndef STCOMM_UTILS_H
-#define STCOMM_UTILS_H
+#pragma once
 
 #include <vector>
 #include <numeric>
@@ -53,5 +52,3 @@ public:
 };
 
 } // namespace stComm
-
-#endif // STCOMM_UTILS_H
