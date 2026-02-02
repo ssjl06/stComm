@@ -15,7 +15,18 @@ protected:
         mpi_comm = std::make_unique<stComm::MPIComm>();
         rank = mpi_comm->getRank();
         size = mpi_comm->getSize();
-        device_id = rank % 4; // Assume up to 4 GPUs per node
+
+        // Get number of available GPUs
+        int num_gpus = 0;
+        cudaGetDeviceCount(&num_gpus);
+
+        // Skip test if not enough GPUs for all ranks
+        if (size > num_gpus) {
+            GTEST_SKIP() << "Test requires " << size << " GPUs but only "
+                         << num_gpus << " available. Each rank needs a unique GPU.";
+        }
+
+        device_id = rank;  // Each rank uses its own GPU
 
         // Get NCCL unique ID
         ncclUniqueId nccl_id;
