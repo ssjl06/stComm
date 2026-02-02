@@ -28,9 +28,6 @@ template<> inline ncclDataType_t NCCLTypeMap<int64_t>::type() { return ncclInt64
 template<> inline ncclDataType_t NCCLTypeMap<uint64_t>::type() { return ncclUint64; }
 template<> inline ncclDataType_t NCCLTypeMap<float>::type() { return ncclFloat32; }
 template<> inline ncclDataType_t NCCLTypeMap<double>::type() { return ncclFloat64; }
-template<> inline ncclDataType_t NCCLTypeMap<char>::type() { return ncclInt8; }
-template<> inline ncclDataType_t NCCLTypeMap<signed char>::type() { return ncclInt8; }
-template<> inline ncclDataType_t NCCLTypeMap<unsigned char>::type() { return ncclUint8; }
 
 /**
  * @brief NCCL-based communication backend for GPU
