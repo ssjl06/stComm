@@ -4,7 +4,9 @@ stComm is a C++/CUDA library providing unified asynchronous communication primit
 
 ## Features
 
+- **Unified Interface**: Single `Communicator` class works with both MPI and NCCL backends
 - **Dual Backend Support**: Seamlessly use MPI for CPU-based communication or NCCL for GPU-based communication
+- **High-Level APIs**: Auto displacement calculation and vector-based interfaces
 - **Template-Based API**: Support for various primitive data types (int, float, double, etc.)
 - **Asynchronous Operations**: Non-blocking communication with async/await pattern
 - **Collective Operations**: Efficient implementations of allgatherv, alltoallv, and more
@@ -19,13 +21,18 @@ stComm/
 │   ├── stComm.h          # Main header (include this)
 │   ├── types.h           # Common type definitions
 │   ├── request.h         # Async request handles
+│   ├── comm_base.h       # Abstract base class
+│   ├── communicator.h    # Unified interface (recommended)
 │   ├── mpi_comm.h        # MPI communication interface
-│   └── nccl_comm.h       # NCCL communication interface
+│   ├── nccl_comm.h       # NCCL communication interface
+│   └── utils.h           # Utility functions (displacement calc, etc.)
 ├── src/stComm/           # Implementation
 ├── tests/                # Google Test suite
+├── examples/             # Example programs
 └── build/                # Build artifacts (generated)
     ├── lib/              # Shared library
-    └── tests/            # Test executables
+    ├── tests/            # Test executables
+    └── examples/         # Example binaries
 ```
 
 ## Prerequisites
@@ -90,7 +97,50 @@ export CUDA_ARCH="89"  # Set to your GPU architecture
 
 ## Usage Examples
 
-### MPI Communication
+### Unified Interface (Recommended)
+
+The `Communicator` class provides a unified interface that works with both MPI and NCCL:
+
+```cpp
+#include "stComm/stComm.h"
+#include <vector>
+
+int main(int argc, char** argv) {
+    stComm::MPIComm::initialize(&argc, &argv);
+
+    // Create communicator with MPI backend
+    stComm::Communicator comm(stComm::Backend::MPI);
+    // For NCCL: stComm::Communicator comm(stComm::Backend::NCCL, rank, size, device_id, nccl_id);
+
+    int rank = comm.getRank();
+    int size = comm.getSize();
+
+    // High-level vector API - easiest!
+    std::vector<int> my_data(10, rank);
+    auto result = comm.allgather_vec(my_data);
+
+    // Auto displacement - no manual calculation!
+    std::vector<int> recvcounts(size);
+    for (int i = 0; i < size; ++i) recvcounts[i] = i + 1;
+
+    std::vector<int> sendbuf(rank + 1, rank * 100);
+    std::vector<int> recvbuf(stComm::Utils::total_size(recvcounts));
+
+    auto req = comm.allgatherv_auto(sendbuf.data(), sendbuf.size(),
+                                    recvbuf.data(), recvcounts.data());
+    req->wait();
+
+    stComm::MPIComm::finalize();
+    return 0;
+}
+```
+
+**Switching backends is easy:**
+1. Change `Backend::MPI` to `Backend::NCCL`
+2. Use device memory instead of host memory
+3. Everything else stays the same!
+
+### MPI Communication (Direct)
 
 ```cpp
 #include "stComm/stComm.h"

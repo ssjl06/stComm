@@ -5,6 +5,7 @@ set(STCOMM_SOURCES
     request.cpp
     mpi_comm.cpp
     nccl_comm.cpp
+    communicator.cpp
     stComm.cpp
 )
 

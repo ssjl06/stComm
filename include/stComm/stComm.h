@@ -7,8 +7,10 @@
 #include "stComm/types.h"
 #include "stComm/request.h"
 #include "stComm/utils.h"
+#include "stComm/comm_base.h"
 #include "stComm/mpi_comm.h"
 #include "stComm/nccl_comm.h"
+#include "stComm/communicator.h"
 
 namespace stComm {
 

@@ -16,6 +16,7 @@ set(TEST_SOURCES
     test_nccl_comm.cpp
     test_integration.cpp
     test_highlevel_api.cpp
+    test_unified_interface.cpp
 )
 
 # Create test executable

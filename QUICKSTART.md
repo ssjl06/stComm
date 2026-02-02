@@ -248,18 +248,79 @@ nvcc -std=c++17 example_nccl.cpp \
 mpirun -np 2 ./example_nccl
 ```
 
+### Unified Interface (Recommended!)
+
+stComm provides a **unified Communicator class** that works with both MPI and NCCL through the same interface!
+
+**Key Benefit**: Write code once, works for both CPU (MPI) and GPU (NCCL)!
+
+```cpp
+#include "stComm/stComm.h"
+#include <iostream>
+#include <vector>
+
+int main(int argc, char** argv) {
+    stComm::MPIComm::initialize(&argc, &argv);
+
+    // Option 1: MPI backend (CPU memory)
+    stComm::Communicator comm(stComm::Backend::MPI);
+
+    // Option 2: NCCL backend (GPU memory)
+    // stComm::Communicator comm(stComm::Backend::NCCL, rank, size, device_id, nccl_id);
+
+    int rank = comm.getRank();
+    int size = comm.getSize();
+
+    // Same API for both backends!
+    std::vector<int> sendbuf(10, rank);
+    auto result = comm.allgather_vec(sendbuf);
+
+    // High-level API with auto displacement
+    std::vector<int> recvcounts(size);
+    for (int i = 0; i < size; ++i) recvcounts[i] = i + 1;
+
+    std::vector<int> my_data(rank + 1, rank);
+    std::vector<int> gathered(stComm::Utils::total_size(recvcounts));
+
+    auto req = comm.allgatherv_auto(my_data.data(), my_data.size(),
+                                    gathered.data(), recvcounts.data());
+    req->wait();
+
+    stComm::MPIComm::finalize();
+    return 0;
+}
+```
+
+**To switch from MPI to NCCL**:
+1. Change `Backend::MPI` to `Backend::NCCL`
+2. Switch from host memory to device memory (cudaMalloc)
+3. Pass `cudaStream_t` parameter if needed
+4. Everything else stays the same!
+
+**Try the example**:
+```bash
+mpirun -np 4 ./build/examples/unified_interface
+```
+
 ## 6. API Overview
 
 ### Core Classes
 
-- **MPIComm**: MPI-based communication (CPU)
+- **Communicator** (Recommended): **Unified interface for both MPI and NCCL**
+  - Same API works for CPU (MPI) and GPU (NCCL) backends
+  - Select backend at construction: `Backend::MPI` or `Backend::NCCL`
+  - **All operations**: `send()`, `recv()`, `allgather()`, `allgatherv_auto()`, `alltoallv_auto()`, etc.
+  - **Vector APIs**: `allgather_vec()`, `allgatherv_vec()`, `alltoallv_vec()` (MPI only)
+  - **Utility**: `getRank()`, `getSize()`, `barrier()`, `getBackend()`
+
+- **MPIComm**: Direct MPI-based communication (CPU)
   - **Point-to-point**: `send<T>()`, `recv<T>()`
   - **Collectives (low-level)**: `allgatherv<T>()`, `alltoallv<T>()`
   - **Collectives (auto)**: `allgatherv_auto<T>()`, `alltoallv_auto<T>()` - **No manual displacement!**
   - **Collectives (vector)**: `allgatherv_vec<T>()`, `alltoallv_vec<T>()` - **Returns result directly!**
   - **Simple collectives**: `allgather<T>()`, `allgather_vec<T>()`, `allreduce<T>()`
 
-- **NCCLComm**: NCCL-based communication (GPU)
+- **NCCLComm**: Direct NCCL-based communication (GPU)
   - **Point-to-point**: `send<T>()`, `recv<T>()`
   - **Collectives (low-level)**: `allgatherv<T>()`, `alltoallv<T>()`
   - **Collectives (auto)**: `allgatherv_auto<T>()`, `alltoallv_auto<T>()` - **No manual displacement!**
