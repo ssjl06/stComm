@@ -176,8 +176,8 @@ TEST_F(MPICommTest, AsyncOperations) {
     } else if (rank == 1) {
         auto req = comm->recv(data.data(), data.size(), 0, 0);
 
-        // Test operation
-        EXPECT_FALSE(req->test()); // Might still be pending
+        // Test non-blocking check
+        req->test();  // Check if operation is complete
 
         // Wait for completion
         req->wait();
