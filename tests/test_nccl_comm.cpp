@@ -51,38 +51,45 @@ TEST_F(NCCLCommTest, BasicProperties) {
     EXPECT_EQ(nccl_comm->getBackend(), stComm::Backend::NCCL);
 }
 
-// Test send/recv
+// Test send/recv with ring pattern (all ranks participate)
 TEST_F(NCCLCommTest, SendRecv) {
     if (size < 2) {
         GTEST_SKIP() << "Test requires at least 2 processes";
     }
 
     const int N = 100;
-    float *d_data;
-    cudaMalloc(&d_data, N * sizeof(float));
+    float *d_send_data, *d_recv_data;
+    cudaMalloc(&d_send_data, N * sizeof(float));
+    cudaMalloc(&d_recv_data, N * sizeof(float));
 
-    if (rank == 0) {
-        std::vector<float> h_data(N);
-        for (int i = 0; i < N; ++i) {
-            h_data[i] = i * 1.5f;
-        }
-        cudaMemcpy(d_data, h_data.data(), N * sizeof(float), cudaMemcpyHostToDevice);
+    // Prepare send data
+    std::vector<float> h_send_data(N);
+    for (int i = 0; i < N; ++i) {
+        h_send_data[i] = rank * 1000 + i * 1.5f;
+    }
+    cudaMemcpy(d_send_data, h_send_data.data(), N * sizeof(float), cudaMemcpyHostToDevice);
 
-        auto req = nccl_comm->send(d_data, N, 1);
-        req->wait();
-    } else if (rank == 1) {
-        auto req = nccl_comm->recv(d_data, N, 0);
-        req->wait();
+    // Ring communication: rank i sends to (i+1)%size, receives from (i-1+size)%size
+    int send_to = (rank + 1) % size;
+    int recv_from = (rank - 1 + size) % size;
 
-        std::vector<float> h_data(N);
-        cudaMemcpy(h_data.data(), d_data, N * sizeof(float), cudaMemcpyDeviceToHost);
+    auto send_req = nccl_comm->send(d_send_data, N, send_to);
+    auto recv_req = nccl_comm->recv(d_recv_data, N, recv_from);
 
-        for (int i = 0; i < N; ++i) {
-            EXPECT_NEAR(h_data[i], i * 1.5f, 1e-6f);
-        }
+    send_req->wait();
+    recv_req->wait();
+
+    // Verify received data
+    std::vector<float> h_recv_data(N);
+    cudaMemcpy(h_recv_data.data(), d_recv_data, N * sizeof(float), cudaMemcpyDeviceToHost);
+
+    for (int i = 0; i < N; ++i) {
+        float expected = recv_from * 1000 + i * 1.5f;
+        EXPECT_NEAR(h_recv_data[i], expected, 1e-6f);
     }
 
-    cudaFree(d_data);
+    cudaFree(d_send_data);
+    cudaFree(d_recv_data);
 }
 
 // Test allgatherv with auto displacement
@@ -170,42 +177,46 @@ TEST_F(NCCLCommTest, Alltoallv) {
     cudaFree(d_recvbuf);
 }
 
-// Test async operations
+// Test async operations with ring pattern (all ranks participate)
 TEST_F(NCCLCommTest, AsyncOperations) {
     if (size < 2) {
         GTEST_SKIP() << "Test requires at least 2 processes";
     }
 
     const int N = 100;
-    int *d_data;
-    cudaMalloc(&d_data, N * sizeof(int));
+    int *d_send_data, *d_recv_data;
+    cudaMalloc(&d_send_data, N * sizeof(int));
+    cudaMalloc(&d_recv_data, N * sizeof(int));
 
-    if (rank == 0) {
-        std::vector<int> h_data(N, rank);
-        cudaMemcpy(d_data, h_data.data(), N * sizeof(int), cudaMemcpyHostToDevice);
+    // Prepare send data
+    std::vector<int> h_send_data(N, rank);
+    cudaMemcpy(d_send_data, h_send_data.data(), N * sizeof(int), cudaMemcpyHostToDevice);
 
-        auto req = nccl_comm->send(d_data, N, 1);
+    // Ring communication
+    int send_to = (rank + 1) % size;
+    int recv_from = (rank - 1 + size) % size;
 
-        // Check if operation is pending
-        req->test();  // Test non-blocking check
+    auto send_req = nccl_comm->send(d_send_data, N, send_to);
+    auto recv_req = nccl_comm->recv(d_recv_data, N, recv_from);
 
-        // Wait for completion
-        req->wait();
-        EXPECT_EQ(req->getStatus(), stComm::Status::SUCCESS);
-    } else if (rank == 1) {
-        auto req = nccl_comm->recv(d_data, N, 0);
+    // Test non-blocking check
+    send_req->test();
+    recv_req->test();
 
-        // Wait for completion
-        req->wait();
-        EXPECT_EQ(req->getStatus(), stComm::Status::SUCCESS);
+    // Wait for completion
+    send_req->wait();
+    recv_req->wait();
+    EXPECT_EQ(send_req->getStatus(), stComm::Status::SUCCESS);
+    EXPECT_EQ(recv_req->getStatus(), stComm::Status::SUCCESS);
 
-        std::vector<int> h_data(N);
-        cudaMemcpy(h_data.data(), d_data, N * sizeof(int), cudaMemcpyDeviceToHost);
+    // Verify received data
+    std::vector<int> h_recv_data(N);
+    cudaMemcpy(h_recv_data.data(), d_recv_data, N * sizeof(int), cudaMemcpyDeviceToHost);
 
-        for (auto val : h_data) {
-            EXPECT_EQ(val, 0);
-        }
+    for (auto val : h_recv_data) {
+        EXPECT_EQ(val, recv_from);
     }
 
-    cudaFree(d_data);
+    cudaFree(d_send_data);
+    cudaFree(d_recv_data);
 }
