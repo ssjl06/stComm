@@ -86,14 +86,15 @@ TEST_F(MPICommTest, Barrier) {
 // ============================================================================
 
 TEST_F(MPICommTest, SendRecvInt) {
-    if (size != 2) {
-        GTEST_SKIP() << "Test requires exactly 2 processes (uses MPI_Bcast for verification)";
+    if (size < 2) {
+        GTEST_SKIP() << "Test requires at least 2 processes";
     }
 
     const int N = 10000;
     std::vector<int> send_data(N);
     std::vector<int> recv_data(N);
 
+    // Only rank 0 and 1 participate in send/recv
     if (rank == 0) {
         fillRandom(send_data);
         auto req = comm->send(send_data.data(), N, 1, 0);
@@ -105,30 +106,29 @@ TEST_F(MPICommTest, SendRecvInt) {
         EXPECT_NE(req, nullptr);
         req->wait();
         EXPECT_EQ(req->getStatus(), stComm::Status::SUCCESS);
+    }
 
-        // Broadcast original data for verification
-        MPI_Bcast(send_data.data(), N * sizeof(int), MPI_BYTE, 0, MPI_COMM_WORLD);
+    // All ranks participate in MPI_Bcast for synchronization
+    MPI_Bcast(send_data.data(), N * sizeof(int), MPI_BYTE, 0, MPI_COMM_WORLD);
 
-        // Verify
+    // Only rank 1 verifies
+    if (rank == 1) {
         for (int i = 0; i < N; ++i) {
             EXPECT_EQ(recv_data[i], send_data[i]) << "Mismatch at index " << i;
         }
     }
-
-    if (rank == 0) {
-        MPI_Bcast(send_data.data(), N * sizeof(int), MPI_BYTE, 0, MPI_COMM_WORLD);
-    }
 }
 
 TEST_F(MPICommTest, SendRecvDouble) {
-    if (size != 2) {
-        GTEST_SKIP() << "Test requires exactly 2 processes (uses MPI_Bcast for verification)";
+    if (size < 2) {
+        GTEST_SKIP() << "Test requires at least 2 processes";
     }
 
     const int N = 5000;
     std::vector<double> send_data(N);
     std::vector<double> recv_data(N);
 
+    // Only rank 0 and 1 participate in send/recv
     if (rank == 0) {
         fillRandom(send_data);
         auto req = comm->send(send_data.data(), N, 1, 0);
@@ -136,28 +136,29 @@ TEST_F(MPICommTest, SendRecvDouble) {
     } else if (rank == 1) {
         auto req = comm->recv(recv_data.data(), N, 0, 0);
         req->wait();
+    }
 
-        MPI_Bcast(send_data.data(), N * sizeof(double), MPI_BYTE, 0, MPI_COMM_WORLD);
+    // All ranks participate in MPI_Bcast for synchronization
+    MPI_Bcast(send_data.data(), N * sizeof(double), MPI_BYTE, 0, MPI_COMM_WORLD);
 
+    // Only rank 1 verifies
+    if (rank == 1) {
         for (int i = 0; i < N; ++i) {
             EXPECT_DOUBLE_EQ(recv_data[i], send_data[i]) << "Mismatch at index " << i;
         }
     }
-
-    if (rank == 0) {
-        MPI_Bcast(send_data.data(), N * sizeof(double), MPI_BYTE, 0, MPI_COMM_WORLD);
-    }
 }
 
 TEST_F(MPICommTest, SendRecvFloat) {
-    if (size != 2) {
-        GTEST_SKIP() << "Test requires exactly 2 processes (uses MPI_Bcast for verification)";
+    if (size < 2) {
+        GTEST_SKIP() << "Test requires at least 2 processes";
     }
 
     const int N = 8000;
     std::vector<float> send_data(N);
     std::vector<float> recv_data(N);
 
+    // Only rank 0 and 1 participate in send/recv
     if (rank == 0) {
         fillRandom(send_data);
         auto req = comm->send(send_data.data(), N, 1, 0);
@@ -165,16 +166,16 @@ TEST_F(MPICommTest, SendRecvFloat) {
     } else if (rank == 1) {
         auto req = comm->recv(recv_data.data(), N, 0, 0);
         req->wait();
+    }
 
-        MPI_Bcast(send_data.data(), N * sizeof(float), MPI_BYTE, 0, MPI_COMM_WORLD);
+    // All ranks participate in MPI_Bcast for synchronization
+    MPI_Bcast(send_data.data(), N * sizeof(float), MPI_BYTE, 0, MPI_COMM_WORLD);
 
+    // Only rank 1 verifies
+    if (rank == 1) {
         for (int i = 0; i < N; ++i) {
             EXPECT_FLOAT_EQ(recv_data[i], send_data[i]) << "Mismatch at index " << i;
         }
-    }
-
-    if (rank == 0) {
-        MPI_Bcast(send_data.data(), N * sizeof(float), MPI_BYTE, 0, MPI_COMM_WORLD);
     }
 }
 
@@ -458,53 +459,57 @@ TEST_F(MPICommTest, AsyncSendRecv) {
 // ============================================================================
 
 TEST_F(MPICommTest, SendRecvInt8) {
-    if (size != 2) {
-        GTEST_SKIP() << "Test requires exactly 2 processes (uses MPI_Bcast for verification)";
+    if (size < 2) {
+        GTEST_SKIP() << "Test requires at least 2 processes";
     }
 
     const int N = 1000;
     std::vector<int8_t> send_data(N);
     std::vector<int8_t> recv_data(N);
 
+    // Only rank 0 and 1 participate in send/recv
     if (rank == 0) {
         fillRandom(send_data);
         comm->send(send_data.data(), N, 1, 0)->wait();
     } else if (rank == 1) {
         comm->recv(recv_data.data(), N, 0, 0)->wait();
-        MPI_Bcast(send_data.data(), N, MPI_BYTE, 0, MPI_COMM_WORLD);
+    }
 
+    // All ranks participate in MPI_Bcast for synchronization
+    MPI_Bcast(send_data.data(), N, MPI_BYTE, 0, MPI_COMM_WORLD);
+
+    // Only rank 1 verifies
+    if (rank == 1) {
         for (int i = 0; i < N; ++i) {
             EXPECT_EQ(recv_data[i], send_data[i]);
         }
     }
-
-    if (rank == 0) {
-        MPI_Bcast(send_data.data(), N, MPI_BYTE, 0, MPI_COMM_WORLD);
-    }
 }
 
 TEST_F(MPICommTest, SendRecvInt64) {
-    if (size != 2) {
-        GTEST_SKIP() << "Test requires exactly 2 processes (uses MPI_Bcast for verification)";
+    if (size < 2) {
+        GTEST_SKIP() << "Test requires at least 2 processes";
     }
 
     const int N = 2000;
     std::vector<int64_t> send_data(N);
     std::vector<int64_t> recv_data(N);
 
+    // Only rank 0 and 1 participate in send/recv
     if (rank == 0) {
         fillRandom(send_data);
         comm->send(send_data.data(), N, 1, 0)->wait();
     } else if (rank == 1) {
         comm->recv(recv_data.data(), N, 0, 0)->wait();
-        MPI_Bcast(send_data.data(), N * sizeof(int64_t), MPI_BYTE, 0, MPI_COMM_WORLD);
+    }
 
+    // All ranks participate in MPI_Bcast for synchronization
+    MPI_Bcast(send_data.data(), N * sizeof(int64_t), MPI_BYTE, 0, MPI_COMM_WORLD);
+
+    // Only rank 1 verifies
+    if (rank == 1) {
         for (int i = 0; i < N; ++i) {
             EXPECT_EQ(recv_data[i], send_data[i]);
         }
-    }
-
-    if (rank == 0) {
-        MPI_Bcast(send_data.data(), N * sizeof(int64_t), MPI_BYTE, 0, MPI_COMM_WORLD);
     }
 }
