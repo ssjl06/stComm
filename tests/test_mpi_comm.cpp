@@ -219,12 +219,18 @@ TEST_F(MPICommTest, SendRecvLargeData) {
     const size_t total_bytes = 3 * GB;
     const size_t count = total_bytes / sizeof(int);
 
-    std::vector<int> send_data;
-    std::vector<int> recv_data;
+    // Helper lambda to generate deterministic pattern (avoids MPI_Bcast >2GB limitation)
+    auto generatePattern = [](size_t i) -> int {
+        return static_cast<int>((i * 7919ULL + 104729ULL) % 1000000);
+    };
 
     if (rank == 0) {
-        send_data.resize(count);
-        fillRandom(send_data);
+        std::vector<int> send_data(count);
+
+        // Fill with deterministic pattern
+        for (size_t i = 0; i < count; ++i) {
+            send_data[i] = generatePattern(i);
+        }
 
         auto req = comm->send(send_data.data(), count, 1, 0);
         EXPECT_NE(req, nullptr);
@@ -232,41 +238,34 @@ TEST_F(MPICommTest, SendRecvLargeData) {
         EXPECT_EQ(req->getStatus(), stComm::Status::SUCCESS);
 
     } else if (rank == 1) {
-        recv_data.resize(count);
+        std::vector<int> recv_data(count);
 
         auto req = comm->recv(recv_data.data(), count, 0, 0);
         EXPECT_NE(req, nullptr);
         req->wait();
         EXPECT_EQ(req->getStatus(), stComm::Status::SUCCESS);
 
-        // Broadcast original for verification
-        send_data.resize(count);
-    }
-
-    // Broadcast send_data
-    if (rank == 0) {
-        MPI_Bcast(send_data.data(), count * sizeof(int), MPI_BYTE, 0, MPI_COMM_WORLD);
-    } else {
-        MPI_Bcast(send_data.data(), count * sizeof(int), MPI_BYTE, 0, MPI_COMM_WORLD);
-    }
-
-    if (rank == 1) {
         // Verify sampling (check every 1M elements to save time)
         const size_t stride = 1000000;
         for (size_t i = 0; i < count; i += stride) {
-            EXPECT_EQ(recv_data[i], send_data[i]) << "Large data mismatch at index " << i;
+            EXPECT_EQ(recv_data[i], generatePattern(i))
+                << "Large data mismatch at index " << i;
         }
 
-        // Verify first, middle, last 1000 elements
+        // Verify first 1000 elements
         for (size_t i = 0; i < 1000 && i < count; ++i) {
-            EXPECT_EQ(recv_data[i], send_data[i]);
+            EXPECT_EQ(recv_data[i], generatePattern(i)) << "Mismatch at index " << i;
         }
+
+        // Verify middle 1000 elements
         size_t mid = count / 2;
         for (size_t i = mid; i < mid + 1000 && i < count; ++i) {
-            EXPECT_EQ(recv_data[i], send_data[i]);
+            EXPECT_EQ(recv_data[i], generatePattern(i)) << "Mismatch at index " << i;
         }
+
+        // Verify last 1000 elements
         for (size_t i = count - 1000; i < count; ++i) {
-            EXPECT_EQ(recv_data[i], send_data[i]);
+            EXPECT_EQ(recv_data[i], generatePattern(i)) << "Mismatch at index " << i;
         }
     }
 }
