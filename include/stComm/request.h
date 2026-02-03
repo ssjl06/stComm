@@ -3,6 +3,7 @@
 #include "types.h"
 #include <mpi.h>
 #include <cuda_runtime.h>
+#include <vector>
 
 namespace stComm {
 
@@ -68,6 +69,47 @@ public:
 
 private:
     MPI_Request req_;
+    Status status_;
+};
+
+/**
+ * @brief Multi MPI request handle for chunked large data transfers
+ * Manages multiple MPI_Request objects for >2GB data transfers
+ */
+class MultiMPIRequest : public Request {
+public:
+    MultiMPIRequest() : status_(Status::PENDING) {}
+
+    void addRequest(MPI_Request req) {
+        requests_.push_back(req);
+    }
+
+    void wait() override {
+        if (!requests_.empty()) {
+            MPI_Waitall(requests_.size(), requests_.data(), MPI_STATUSES_IGNORE);
+            status_ = Status::SUCCESS;
+        }
+    }
+
+    bool test() override {
+        if (requests_.empty()) {
+            return true;
+        }
+        int flag;
+        MPI_Testall(requests_.size(), requests_.data(), &flag, MPI_STATUSES_IGNORE);
+        if (flag) {
+            status_ = Status::SUCCESS;
+            return true;
+        }
+        return false;
+    }
+
+    Status getStatus() const override {
+        return status_;
+    }
+
+private:
+    std::vector<MPI_Request> requests_;
     Status status_;
 };
 

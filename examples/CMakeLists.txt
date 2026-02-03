@@ -19,6 +19,12 @@ set_target_properties(mpi_collective PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/examples
 )
 
+add_executable(mpi_large_data mpi_large_data.cpp)
+target_link_libraries(mpi_large_data PRIVATE stComm MPI::MPI_CXX)
+set_target_properties(mpi_large_data PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/examples
+)
+
 # NCCL examples
 add_executable(nccl_ring nccl_ring.cpp)
 target_link_libraries(nccl_ring PRIVATE stComm MPI::MPI_CXX CUDA::cudart)

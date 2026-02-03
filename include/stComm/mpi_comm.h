@@ -31,6 +31,7 @@ public:
     void barrier() override;
 
     // Point-to-point communication (async)
+    // Automatically handles large data (>2GB) by chunking
     template<typename T>
     RequestPtr send(const T* data, size_t count, int dest, int tag = 0);
 
@@ -38,6 +39,7 @@ public:
     RequestPtr recv(T* data, size_t count, int source, int tag = 0);
 
     // Collective communication - with auto displacement
+    // Automatically handles large data (>2GB) by chunking
     template<typename T>
     RequestPtr allgatherv(const T* sendbuf, int sendcount,
                          T* recvbuf, const int* recvcounts);
@@ -64,12 +66,31 @@ RequestPtr MPIComm::send(const T* data, size_t count, int dest, int tag) {
     static_assert(std::is_trivially_copyable<T>::value,
                   "Type must be trivially copyable for MPI communication");
 
-    auto req = std::make_shared<MPIRequest>();
+    const size_t total_bytes = count * sizeof(T);
+    const size_t MAX_CHUNK_SIZE = 1073741824;  // 1GB per chunk
 
-    // Use MPI_BYTE to handle arbitrary sizes without MPI datatype limits
-    MPI_Isend(data, count * sizeof(T), MPI_BYTE, dest, tag, comm_, &req->getHandle());
+    // Check if we need chunking for large data (>2GB)
+    if (total_bytes <= static_cast<size_t>(INT_MAX)) {
+        // Small data: single MPI call
+        auto req = std::make_shared<MPIRequest>();
+        MPI_Isend(data, total_bytes, MPI_BYTE, dest, tag, comm_, &req->getHandle());
+        return req;
+    }
 
-    return req;
+    // Large data: split into chunks
+    auto multi_req = std::make_shared<MultiMPIRequest>();
+    const char* byte_data = reinterpret_cast<const char*>(data);
+    size_t offset = 0;
+
+    while (offset < total_bytes) {
+        size_t chunk_size = std::min(MAX_CHUNK_SIZE, total_bytes - offset);
+        MPI_Request mpi_req;
+        MPI_Isend(byte_data + offset, static_cast<int>(chunk_size), MPI_BYTE, dest, tag, comm_, &mpi_req);
+        multi_req->addRequest(mpi_req);
+        offset += chunk_size;
+    }
+
+    return multi_req;
 }
 
 template<typename T>
@@ -77,12 +98,31 @@ RequestPtr MPIComm::recv(T* data, size_t count, int source, int tag) {
     static_assert(std::is_trivially_copyable<T>::value,
                   "Type must be trivially copyable for MPI communication");
 
-    auto req = std::make_shared<MPIRequest>();
+    const size_t total_bytes = count * sizeof(T);
+    const size_t MAX_CHUNK_SIZE = 1073741824;  // 1GB per chunk
 
-    // Use MPI_BYTE to handle arbitrary sizes
-    MPI_Irecv(data, count * sizeof(T), MPI_BYTE, source, tag, comm_, &req->getHandle());
+    // Check if we need chunking for large data (>2GB)
+    if (total_bytes <= static_cast<size_t>(INT_MAX)) {
+        // Small data: single MPI call
+        auto req = std::make_shared<MPIRequest>();
+        MPI_Irecv(data, total_bytes, MPI_BYTE, source, tag, comm_, &req->getHandle());
+        return req;
+    }
 
-    return req;
+    // Large data: split into chunks
+    auto multi_req = std::make_shared<MultiMPIRequest>();
+    char* byte_data = reinterpret_cast<char*>(data);
+    size_t offset = 0;
+
+    while (offset < total_bytes) {
+        size_t chunk_size = std::min(MAX_CHUNK_SIZE, total_bytes - offset);
+        MPI_Request mpi_req;
+        MPI_Irecv(byte_data + offset, static_cast<int>(chunk_size), MPI_BYTE, source, tag, comm_, &mpi_req);
+        multi_req->addRequest(mpi_req);
+        offset += chunk_size;
+    }
+
+    return multi_req;
 }
 
 template<typename T>
