@@ -86,8 +86,8 @@ TEST_F(MPICommTest, Barrier) {
 // ============================================================================
 
 TEST_F(MPICommTest, SendRecvInt) {
-    if (size < 2) {
-        GTEST_SKIP() << "Test requires at least 2 processes";
+    if (size != 2) {
+        GTEST_SKIP() << "Test requires exactly 2 processes (uses MPI_Bcast for verification)";
     }
 
     const int N = 10000;
@@ -121,8 +121,8 @@ TEST_F(MPICommTest, SendRecvInt) {
 }
 
 TEST_F(MPICommTest, SendRecvDouble) {
-    if (size < 2) {
-        GTEST_SKIP() << "Test requires at least 2 processes";
+    if (size != 2) {
+        GTEST_SKIP() << "Test requires exactly 2 processes (uses MPI_Bcast for verification)";
     }
 
     const int N = 5000;
@@ -150,8 +150,8 @@ TEST_F(MPICommTest, SendRecvDouble) {
 }
 
 TEST_F(MPICommTest, SendRecvFloat) {
-    if (size < 2) {
-        GTEST_SKIP() << "Test requires at least 2 processes";
+    if (size != 2) {
+        GTEST_SKIP() << "Test requires exactly 2 processes (uses MPI_Bcast for verification)";
     }
 
     const int N = 8000;
@@ -458,8 +458,8 @@ TEST_F(MPICommTest, AsyncSendRecv) {
 // ============================================================================
 
 TEST_F(MPICommTest, SendRecvInt8) {
-    if (size < 2) {
-        GTEST_SKIP() << "Test requires at least 2 processes";
+    if (size != 2) {
+        GTEST_SKIP() << "Test requires exactly 2 processes (uses MPI_Bcast for verification)";
     }
 
     const int N = 1000;
@@ -484,8 +484,8 @@ TEST_F(MPICommTest, SendRecvInt8) {
 }
 
 TEST_F(MPICommTest, SendRecvInt64) {
-    if (size < 2) {
-        GTEST_SKIP() << "Test requires at least 2 processes";
+    if (size != 2) {
+        GTEST_SKIP() << "Test requires exactly 2 processes (uses MPI_Bcast for verification)";
     }
 
     const int N = 2000;
