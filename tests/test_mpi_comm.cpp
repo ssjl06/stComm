@@ -1,11 +1,14 @@
 /**
  * @file test_mpi_comm.cpp
- * @brief Tests for MPIComm class
+ * @brief Comprehensive tests for MPIComm class with random data
  */
 
 #include <gtest/gtest.h>
 #include "stComm/stComm.h"
 #include <vector>
+#include <random>
+#include <algorithm>
+#include <cstring>
 
 class MPICommTest : public ::testing::Test {
 protected:
@@ -13,91 +16,330 @@ protected:
         comm = std::make_unique<stComm::MPIComm>();
         rank = comm->getRank();
         size = comm->getSize();
+
+        // Initialize random generator with rank-based seed for reproducibility
+        rng.seed(12345 + rank);
     }
 
     void TearDown() override {
         comm.reset();
     }
 
+    // Helper to generate random data
+    template<typename T>
+    void fillRandom(std::vector<T>& data) {
+        if constexpr (std::is_integral<T>::value) {
+            std::uniform_int_distribution<T> dist(std::numeric_limits<T>::min(),
+                                                   std::numeric_limits<T>::max());
+            for (auto& val : data) {
+                val = dist(rng);
+            }
+        } else {
+            std::uniform_real_distribution<T> dist(-1000.0, 1000.0);
+            for (auto& val : data) {
+                val = dist(rng);
+            }
+        }
+    }
+
     std::unique_ptr<stComm::MPIComm> comm;
     int rank;
     int size;
+    std::mt19937 rng;
 };
 
-// Test basic properties
-TEST_F(MPICommTest, BasicProperties) {
-    EXPECT_GE(rank, 0);
-    EXPECT_LT(rank, size);
-    EXPECT_GT(size, 0);
+// ============================================================================
+// Basic Interface Tests
+// ============================================================================
+
+TEST_F(MPICommTest, GetRank) {
+    int r = comm->getRank();
+    EXPECT_GE(r, 0);
+    EXPECT_LT(r, size);
+    EXPECT_EQ(r, rank);
+}
+
+TEST_F(MPICommTest, GetSize) {
+    int s = comm->getSize();
+    EXPECT_GT(s, 0);
+    EXPECT_EQ(s, size);
+}
+
+TEST_F(MPICommTest, GetBackend) {
     EXPECT_EQ(comm->getBackend(), stComm::Backend::MPI);
 }
 
-// Test barrier
+TEST_F(MPICommTest, GetHandle) {
+    MPI_Comm handle = comm->getHandle();
+    EXPECT_NE(handle, MPI_COMM_NULL);
+}
+
 TEST_F(MPICommTest, Barrier) {
+    // Test multiple barriers
+    EXPECT_NO_THROW(comm->barrier());
+    EXPECT_NO_THROW(comm->barrier());
     EXPECT_NO_THROW(comm->barrier());
 }
 
-// Test send/recv
-TEST_F(MPICommTest, SendRecv) {
+// ============================================================================
+// Point-to-Point Communication Tests
+// ============================================================================
+
+TEST_F(MPICommTest, SendRecvInt) {
     if (size < 2) {
         GTEST_SKIP() << "Test requires at least 2 processes";
     }
 
-    std::vector<int> data(100);
+    const int N = 10000;
+    std::vector<int> send_data(N);
+    std::vector<int> recv_data(N);
 
     if (rank == 0) {
-        for (int i = 0; i < 100; ++i) {
-            data[i] = i;
+        fillRandom(send_data);
+        auto req = comm->send(send_data.data(), N, 1, 0);
+        EXPECT_NE(req, nullptr);
+        req->wait();
+        EXPECT_EQ(req->getStatus(), stComm::Status::SUCCESS);
+    } else if (rank == 1) {
+        auto req = comm->recv(recv_data.data(), N, 0, 0);
+        EXPECT_NE(req, nullptr);
+        req->wait();
+        EXPECT_EQ(req->getStatus(), stComm::Status::SUCCESS);
+
+        // Broadcast original data for verification
+        MPI_Bcast(send_data.data(), N * sizeof(int), MPI_BYTE, 0, MPI_COMM_WORLD);
+
+        // Verify
+        for (int i = 0; i < N; ++i) {
+            EXPECT_EQ(recv_data[i], send_data[i]) << "Mismatch at index " << i;
         }
-        auto req = comm->send(data.data(), data.size(), 1, 0);
+    }
+
+    if (rank == 0) {
+        MPI_Bcast(send_data.data(), N * sizeof(int), MPI_BYTE, 0, MPI_COMM_WORLD);
+    }
+}
+
+TEST_F(MPICommTest, SendRecvDouble) {
+    if (size < 2) {
+        GTEST_SKIP() << "Test requires at least 2 processes";
+    }
+
+    const int N = 5000;
+    std::vector<double> send_data(N);
+    std::vector<double> recv_data(N);
+
+    if (rank == 0) {
+        fillRandom(send_data);
+        auto req = comm->send(send_data.data(), N, 1, 0);
         req->wait();
     } else if (rank == 1) {
-        auto req = comm->recv(data.data(), data.size(), 0, 0);
+        auto req = comm->recv(recv_data.data(), N, 0, 0);
         req->wait();
 
-        for (int i = 0; i < 100; ++i) {
-            EXPECT_EQ(data[i], i);
+        MPI_Bcast(send_data.data(), N * sizeof(double), MPI_BYTE, 0, MPI_COMM_WORLD);
+
+        for (int i = 0; i < N; ++i) {
+            EXPECT_DOUBLE_EQ(recv_data[i], send_data[i]) << "Mismatch at index " << i;
+        }
+    }
+
+    if (rank == 0) {
+        MPI_Bcast(send_data.data(), N * sizeof(double), MPI_BYTE, 0, MPI_COMM_WORLD);
+    }
+}
+
+TEST_F(MPICommTest, SendRecvFloat) {
+    if (size < 2) {
+        GTEST_SKIP() << "Test requires at least 2 processes";
+    }
+
+    const int N = 8000;
+    std::vector<float> send_data(N);
+    std::vector<float> recv_data(N);
+
+    if (rank == 0) {
+        fillRandom(send_data);
+        auto req = comm->send(send_data.data(), N, 1, 0);
+        req->wait();
+    } else if (rank == 1) {
+        auto req = comm->recv(recv_data.data(), N, 0, 0);
+        req->wait();
+
+        MPI_Bcast(send_data.data(), N * sizeof(float), MPI_BYTE, 0, MPI_COMM_WORLD);
+
+        for (int i = 0; i < N; ++i) {
+            EXPECT_FLOAT_EQ(recv_data[i], send_data[i]) << "Mismatch at index " << i;
+        }
+    }
+
+    if (rank == 0) {
+        MPI_Bcast(send_data.data(), N * sizeof(float), MPI_BYTE, 0, MPI_COMM_WORLD);
+    }
+}
+
+TEST_F(MPICommTest, SendRecvRingPattern) {
+    const int N = 1000;
+    std::vector<int> send_data(N);
+    std::vector<int> recv_data(N);
+
+    fillRandom(send_data);
+
+    int next = (rank + 1) % size;
+    int prev = (rank - 1 + size) % size;
+
+    auto send_req = comm->send(send_data.data(), N, next, 0);
+    auto recv_req = comm->recv(recv_data.data(), N, prev, 0);
+
+    send_req->wait();
+    recv_req->wait();
+
+    // Gather all data to verify ring pattern
+    std::vector<int> all_data(N * size);
+    MPI_Allgather(send_data.data(), N * sizeof(int), MPI_BYTE,
+                  all_data.data(), N * sizeof(int), MPI_BYTE, MPI_COMM_WORLD);
+
+    // Verify received from previous rank
+    for (int i = 0; i < N; ++i) {
+        EXPECT_EQ(recv_data[i], all_data[prev * N + i]) << "Ring pattern failed at index " << i;
+    }
+}
+
+// ============================================================================
+// Large Data Transfer Tests (>2GB)
+// ============================================================================
+
+TEST_F(MPICommTest, SendRecvLargeData) {
+    if (size < 2) {
+        GTEST_SKIP() << "Test requires at least 2 processes";
+    }
+
+    // 3GB worth of integers
+    const size_t GB = 1024ULL * 1024ULL * 1024ULL;
+    const size_t total_bytes = 3 * GB;
+    const size_t count = total_bytes / sizeof(int);
+
+    std::vector<int> send_data;
+    std::vector<int> recv_data;
+
+    if (rank == 0) {
+        send_data.resize(count);
+        fillRandom(send_data);
+
+        auto req = comm->send(send_data.data(), count, 1, 0);
+        EXPECT_NE(req, nullptr);
+        req->wait();
+        EXPECT_EQ(req->getStatus(), stComm::Status::SUCCESS);
+
+    } else if (rank == 1) {
+        recv_data.resize(count);
+
+        auto req = comm->recv(recv_data.data(), count, 0, 0);
+        EXPECT_NE(req, nullptr);
+        req->wait();
+        EXPECT_EQ(req->getStatus(), stComm::Status::SUCCESS);
+
+        // Broadcast original for verification
+        send_data.resize(count);
+    }
+
+    // Broadcast send_data
+    if (rank == 0) {
+        MPI_Bcast(send_data.data(), count * sizeof(int), MPI_BYTE, 0, MPI_COMM_WORLD);
+    } else {
+        MPI_Bcast(send_data.data(), count * sizeof(int), MPI_BYTE, 0, MPI_COMM_WORLD);
+    }
+
+    if (rank == 1) {
+        // Verify sampling (check every 1M elements to save time)
+        const size_t stride = 1000000;
+        for (size_t i = 0; i < count; i += stride) {
+            EXPECT_EQ(recv_data[i], send_data[i]) << "Large data mismatch at index " << i;
+        }
+
+        // Verify first, middle, last 1000 elements
+        for (size_t i = 0; i < 1000 && i < count; ++i) {
+            EXPECT_EQ(recv_data[i], send_data[i]);
+        }
+        size_t mid = count / 2;
+        for (size_t i = mid; i < mid + 1000 && i < count; ++i) {
+            EXPECT_EQ(recv_data[i], send_data[i]);
+        }
+        for (size_t i = count - 1000; i < count; ++i) {
+            EXPECT_EQ(recv_data[i], send_data[i]);
         }
     }
 }
 
-// Test allgatherv with auto displacement
-TEST_F(MPICommTest, Allgatherv) {
-    // Each rank sends different amount
-    int sendcount = rank + 1;
+// ============================================================================
+// Collective Communication Tests
+// ============================================================================
+
+TEST_F(MPICommTest, AllgathervUniformCounts) {
+    const int sendcount = 100;
     std::vector<int> sendbuf(sendcount);
-    for (int i = 0; i < sendcount; ++i) {
-        sendbuf[i] = rank * 100 + i;
-    }
+    fillRandom(sendbuf);
 
-    // Prepare receive counts
-    std::vector<int> recvcounts(size);
-    for (int i = 0; i < size; ++i) {
-        recvcounts[i] = i + 1;
-    }
-
-    // Calculate total receive size
+    std::vector<int> recvcounts(size, sendcount);
     int total_recv = stComm::Utils::totalSize(recvcounts);
     std::vector<int> recvbuf(total_recv);
 
-    // Call allgatherv (displacement auto-calculated)
     auto req = comm->allgatherv(sendbuf.data(), sendcount, recvbuf.data(), recvcounts.data());
+    EXPECT_NE(req, nullptr);
     req->wait();
+    EXPECT_EQ(req->getStatus(), stComm::Status::SUCCESS);
 
-    // Verify data
-    auto displs = stComm::Utils::calculateDisplacements(recvcounts);
-    for (int r = 0; r < size; ++r) {
-        for (int i = 0; i < recvcounts[r]; ++i) {
-            EXPECT_EQ(recvbuf[displs[r] + i], r * 100 + i);
-        }
+    // Verify by comparing with MPI_Allgather
+    std::vector<int> expected(total_recv);
+    MPI_Allgather(sendbuf.data(), sendcount * sizeof(int), MPI_BYTE,
+                  expected.data(), sendcount * sizeof(int), MPI_BYTE, MPI_COMM_WORLD);
+
+    for (int i = 0; i < total_recv; ++i) {
+        EXPECT_EQ(recvbuf[i], expected[i]) << "Allgatherv mismatch at index " << i;
     }
 }
 
-// Test alltoallv with auto displacement
-TEST_F(MPICommTest, Alltoallv) {
-    // Each rank sends 2 items to each other rank
-    std::vector<int> sendcounts(size, 2);
-    std::vector<int> recvcounts(size, 2);
+TEST_F(MPICommTest, AllgathervVariableCounts) {
+    // Each rank sends different amount
+    int sendcount = (rank + 1) * 50;
+    std::vector<int> sendbuf(sendcount);
+    fillRandom(sendbuf);
+
+    std::vector<int> recvcounts(size);
+    for (int i = 0; i < size; ++i) {
+        recvcounts[i] = (i + 1) * 50;
+    }
+
+    int total_recv = stComm::Utils::totalSize(recvcounts);
+    std::vector<int> recvbuf(total_recv);
+
+    auto req = comm->allgatherv(sendbuf.data(), sendcount, recvbuf.data(), recvcounts.data());
+    req->wait();
+
+    // Verify with manual allgather
+    auto displs = stComm::Utils::calculateDisplacements(recvcounts);
+    std::vector<int> expected(total_recv);
+
+    std::vector<int> byte_recvcounts(size);
+    std::vector<int> byte_displs(size);
+    for (int i = 0; i < size; ++i) {
+        byte_recvcounts[i] = recvcounts[i] * sizeof(int);
+        byte_displs[i] = displs[i] * sizeof(int);
+    }
+
+    MPI_Allgatherv(sendbuf.data(), sendcount * sizeof(int), MPI_BYTE,
+                   expected.data(), byte_recvcounts.data(), byte_displs.data(),
+                   MPI_BYTE, MPI_COMM_WORLD);
+
+    for (int i = 0; i < total_recv; ++i) {
+        EXPECT_EQ(recvbuf[i], expected[i]) << "Variable allgatherv mismatch at index " << i;
+    }
+}
+
+TEST_F(MPICommTest, AlltoallvUniformCounts) {
+    const int count_per_rank = 50;
+    std::vector<int> sendcounts(size, count_per_rank);
+    std::vector<int> recvcounts(size, count_per_rank);
 
     int total_send = stComm::Utils::totalSize(sendcounts);
     int total_recv = stComm::Utils::totalSize(recvcounts);
@@ -105,86 +347,165 @@ TEST_F(MPICommTest, Alltoallv) {
     std::vector<int> sendbuf(total_send);
     std::vector<int> recvbuf(total_recv);
 
-    // Fill sendbuf
-    auto send_displs = stComm::Utils::calculateDisplacements(sendcounts);
-    for (int dest = 0; dest < size; ++dest) {
-        for (int i = 0; i < sendcounts[dest]; ++i) {
-            sendbuf[send_displs[dest] + i] = rank * 1000 + dest * 100 + i;
-        }
+    fillRandom(sendbuf);
+
+    auto req = comm->alltoallv(sendbuf.data(), sendcounts.data(),
+                               recvbuf.data(), recvcounts.data());
+    EXPECT_NE(req, nullptr);
+    req->wait();
+    EXPECT_EQ(req->getStatus(), stComm::Status::SUCCESS);
+
+    // Verify with MPI_Alltoall
+    std::vector<int> expected(total_recv);
+    MPI_Alltoall(sendbuf.data(), count_per_rank * sizeof(int), MPI_BYTE,
+                 expected.data(), count_per_rank * sizeof(int), MPI_BYTE,
+                 MPI_COMM_WORLD);
+
+    for (int i = 0; i < total_recv; ++i) {
+        EXPECT_EQ(recvbuf[i], expected[i]) << "Alltoallv uniform mismatch at index " << i;
+    }
+}
+
+TEST_F(MPICommTest, AlltoallvVariableCounts) {
+    std::vector<int> sendcounts(size);
+    std::vector<int> recvcounts(size);
+
+    // Rank i sends (i+1)*10 to rank j, receives (j+1)*10 from rank j
+    for (int i = 0; i < size; ++i) {
+        sendcounts[i] = (rank + 1) * 10;
+        recvcounts[i] = (i + 1) * 10;
     }
 
-    // Call alltoallv (displacement auto-calculated)
+    int total_send = stComm::Utils::totalSize(sendcounts);
+    int total_recv = stComm::Utils::totalSize(recvcounts);
+
+    std::vector<int> sendbuf(total_send);
+    std::vector<int> recvbuf(total_recv);
+
+    fillRandom(sendbuf);
+
     auto req = comm->alltoallv(sendbuf.data(), sendcounts.data(),
                                recvbuf.data(), recvcounts.data());
     req->wait();
 
-    // Verify received data
-    auto recv_displs = stComm::Utils::calculateDisplacements(recvcounts);
-    for (int src = 0; src < size; ++src) {
-        for (int i = 0; i < recvcounts[src]; ++i) {
-            int expected = src * 1000 + rank * 100 + i;
-            EXPECT_EQ(recvbuf[recv_displs[src] + i], expected);
-        }
+    // Verify with MPI_Alltoallv
+    auto sdispls = stComm::Utils::calculateDisplacements(sendcounts);
+    auto rdispls = stComm::Utils::calculateDisplacements(recvcounts);
+
+    std::vector<int> byte_sendcounts(size);
+    std::vector<int> byte_sdispls(size);
+    std::vector<int> byte_recvcounts(size);
+    std::vector<int> byte_rdispls(size);
+
+    for (int i = 0; i < size; ++i) {
+        byte_sendcounts[i] = sendcounts[i] * sizeof(int);
+        byte_sdispls[i] = sdispls[i] * sizeof(int);
+        byte_recvcounts[i] = recvcounts[i] * sizeof(int);
+        byte_rdispls[i] = rdispls[i] * sizeof(int);
+    }
+
+    std::vector<int> expected(total_recv);
+    MPI_Alltoallv(sendbuf.data(), byte_sendcounts.data(), byte_sdispls.data(), MPI_BYTE,
+                  expected.data(), byte_recvcounts.data(), byte_rdispls.data(), MPI_BYTE,
+                  MPI_COMM_WORLD);
+
+    for (int i = 0; i < total_recv; ++i) {
+        EXPECT_EQ(recvbuf[i], expected[i]) << "Variable alltoallv mismatch at index " << i;
     }
 }
 
-// Test with different data types
-TEST_F(MPICommTest, DifferentTypes) {
+// ============================================================================
+// Async Operation Tests
+// ============================================================================
+
+TEST_F(MPICommTest, AsyncSendRecv) {
     if (size < 2) {
         GTEST_SKIP() << "Test requires at least 2 processes";
     }
 
-    // Test with double
-    std::vector<double> double_data(50);
+    const int N = 5000;
+    std::vector<int> data(N);
 
     if (rank == 0) {
-        for (int i = 0; i < 50; ++i) {
-            double_data[i] = i * 1.5;
-        }
-        auto req = comm->send(double_data.data(), double_data.size(), 1, 0);
-        req->wait();
-    } else if (rank == 1) {
-        auto req = comm->recv(double_data.data(), double_data.size(), 0, 0);
-        req->wait();
+        fillRandom(data);
+        auto req = comm->send(data.data(), N, 1, 0);
 
-        for (int i = 0; i < 50; ++i) {
-            EXPECT_NEAR(double_data[i], i * 1.5, 1e-9);
-        }
-    }
-}
-
-// Test async operations
-TEST_F(MPICommTest, AsyncOperations) {
-    if (size < 2) {
-        GTEST_SKIP() << "Test requires at least 2 processes";
-    }
-
-    std::vector<int> data(100, rank);
-
-    if (rank == 0) {
-        auto req = comm->send(data.data(), data.size(), 1, 0);
-
-        // Do other work while send is in progress
-        int dummy = 0;
-        for (int i = 0; i < 1000; ++i) {
+        // Do some work while send is in progress
+        volatile int dummy = 0;
+        for (int i = 0; i < 10000; ++i) {
             dummy += i;
         }
 
-        // Wait for completion
+        // Test status before wait
+        req->test();
+
         req->wait();
         EXPECT_EQ(req->getStatus(), stComm::Status::SUCCESS);
+
     } else if (rank == 1) {
-        auto req = comm->recv(data.data(), data.size(), 0, 0);
+        auto req = comm->recv(data.data(), N, 0, 0);
 
-        // Test non-blocking check
-        req->test();  // Check if operation is complete
+        // Test multiple times
+        req->test();
+        req->test();
 
-        // Wait for completion
         req->wait();
         EXPECT_EQ(req->getStatus(), stComm::Status::SUCCESS);
+    }
+}
 
-        for (auto val : data) {
-            EXPECT_EQ(val, 0);
+// ============================================================================
+// Multiple Data Type Tests
+// ============================================================================
+
+TEST_F(MPICommTest, SendRecvInt8) {
+    if (size < 2) {
+        GTEST_SKIP() << "Test requires at least 2 processes";
+    }
+
+    const int N = 1000;
+    std::vector<int8_t> send_data(N);
+    std::vector<int8_t> recv_data(N);
+
+    if (rank == 0) {
+        fillRandom(send_data);
+        comm->send(send_data.data(), N, 1, 0)->wait();
+    } else if (rank == 1) {
+        comm->recv(recv_data.data(), N, 0, 0)->wait();
+        MPI_Bcast(send_data.data(), N, MPI_BYTE, 0, MPI_COMM_WORLD);
+
+        for (int i = 0; i < N; ++i) {
+            EXPECT_EQ(recv_data[i], send_data[i]);
         }
+    }
+
+    if (rank == 0) {
+        MPI_Bcast(send_data.data(), N, MPI_BYTE, 0, MPI_COMM_WORLD);
+    }
+}
+
+TEST_F(MPICommTest, SendRecvInt64) {
+    if (size < 2) {
+        GTEST_SKIP() << "Test requires at least 2 processes";
+    }
+
+    const int N = 2000;
+    std::vector<int64_t> send_data(N);
+    std::vector<int64_t> recv_data(N);
+
+    if (rank == 0) {
+        fillRandom(send_data);
+        comm->send(send_data.data(), N, 1, 0)->wait();
+    } else if (rank == 1) {
+        comm->recv(recv_data.data(), N, 0, 0)->wait();
+        MPI_Bcast(send_data.data(), N * sizeof(int64_t), MPI_BYTE, 0, MPI_COMM_WORLD);
+
+        for (int i = 0; i < N; ++i) {
+            EXPECT_EQ(recv_data[i], send_data[i]);
+        }
+    }
+
+    if (rank == 0) {
+        MPI_Bcast(send_data.data(), N * sizeof(int64_t), MPI_BYTE, 0, MPI_COMM_WORLD);
     }
 }
