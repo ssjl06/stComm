@@ -1,0 +1,31 @@
+@PACKAGE_INIT@
+
+# stComm CMake configuration file
+
+# Find dependencies
+include(CMakeFindDependencyMacro)
+
+find_dependency(MPI REQUIRED)
+find_dependency(CUDAToolkit REQUIRED)
+
+# Find NCCL
+if(DEFINED ENV{NCCL_HOME})
+    set(NCCL_INCLUDE_DIR "$ENV{NCCL_HOME}/include")
+    find_library(NCCL_LIBRARY
+        NAMES nccl
+        PATHS "$ENV{NCCL_HOME}/lib" "$ENV{NCCL_HOME}/lib64"
+        NO_DEFAULT_PATH
+    )
+else()
+    find_path(NCCL_INCLUDE_DIR NAMES nccl.h)
+    find_library(NCCL_LIBRARY NAMES nccl)
+endif()
+
+if(NOT NCCL_INCLUDE_DIR OR NOT NCCL_LIBRARY)
+    message(FATAL_ERROR "NCCL not found. Set NCCL_HOME environment variable.")
+endif()
+
+# Include exported targets
+include("${CMAKE_CURRENT_LIST_DIR}/stCommTargets.cmake")
+
+check_required_components(stComm)

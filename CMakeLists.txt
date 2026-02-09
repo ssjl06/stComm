@@ -72,3 +72,60 @@ set(CMAKE_CXX_FLAGS_DEBUG "${CMAKE_CXX_FLAGS_DEBUG} -g -O0")
 add_subdirectory(src/stComm)
 add_subdirectory(tests)
 add_subdirectory(examples)
+
+# ============================================================================
+# Installation
+# ============================================================================
+
+include(GNUInstallDirs)
+
+# Install header files
+install(DIRECTORY include/stComm
+    DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}
+    FILES_MATCHING PATTERN "*.h"
+)
+
+# Install library (configured in src/stComm/CMakeLists.txt)
+# Library targets are exported there
+
+# Generate and install CMake config files
+include(CMakePackageConfigHelpers)
+
+# Create stCommConfig.cmake
+configure_package_config_file(
+    ${CMAKE_CURRENT_SOURCE_DIR}/cmake/stCommConfig.cmake.in
+    ${CMAKE_CURRENT_BINARY_DIR}/stCommConfig.cmake
+    INSTALL_DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/stComm
+)
+
+# Create stCommConfigVersion.cmake
+write_basic_package_version_file(
+    ${CMAKE_CURRENT_BINARY_DIR}/stCommConfigVersion.cmake
+    VERSION ${PROJECT_VERSION}
+    COMPATIBILITY SameMajorVersion
+)
+
+# Install CMake config files
+install(FILES
+    ${CMAKE_CURRENT_BINARY_DIR}/stCommConfig.cmake
+    ${CMAKE_CURRENT_BINARY_DIR}/stCommConfigVersion.cmake
+    DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/stComm
+)
+
+# Install export targets
+install(EXPORT stCommTargets
+    FILE stCommTargets.cmake
+    NAMESPACE stComm::
+    DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/stComm
+)
+
+# Print installation info
+message(STATUS "")
+message(STATUS "========================================")
+message(STATUS "stComm installation configuration:")
+message(STATUS "  Install prefix: ${CMAKE_INSTALL_PREFIX}")
+message(STATUS "  Headers: ${CMAKE_INSTALL_PREFIX}/${CMAKE_INSTALL_INCLUDEDIR}/stComm")
+message(STATUS "  Library: ${CMAKE_INSTALL_PREFIX}/${CMAKE_INSTALL_LIBDIR}")
+message(STATUS "  CMake config: ${CMAKE_INSTALL_PREFIX}/${CMAKE_INSTALL_LIBDIR}/cmake/stComm")
+message(STATUS "========================================")
+message(STATUS "")

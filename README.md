@@ -77,6 +77,58 @@ Outputs:
 ./run_tests.sh -f "MPICommTest.*"  # Run specific tests
 ```
 
+### 4. Install (Optional)
+
+Install to system path or custom location:
+
+```bash
+# Install to default location (/usr/local)
+sudo ./install.sh
+
+# Install to custom location
+./install.sh $HOME/local/stComm
+```
+
+After installation, add to your environment:
+
+```bash
+export CMAKE_PREFIX_PATH=$HOME/local/stComm:$CMAKE_PREFIX_PATH
+export LD_LIBRARY_PATH=$HOME/local/stComm/lib:$LD_LIBRARY_PATH
+```
+
+## Using Installed Library
+
+### In Your CMake Project
+
+```cmake
+cmake_minimum_required(VERSION 3.18)
+project(MyProject LANGUAGES CXX CUDA)
+
+# Find stComm
+find_package(stComm REQUIRED)
+
+# Your executable
+add_executable(my_app main.cpp)
+
+# Link stComm
+target_link_libraries(my_app PRIVATE stComm::stComm)
+```
+
+### Compile Your Program
+
+```bash
+# Set environment if custom install location
+export CMAKE_PREFIX_PATH=$HOME/local/stComm:$CMAKE_PREFIX_PATH
+
+mkdir build && cd build
+cmake ..
+make
+
+# Run
+export LD_LIBRARY_PATH=$HOME/local/stComm/lib:$LD_LIBRARY_PATH
+mpirun -np 2 ./my_app
+```
+
 ## Usage Examples
 
 ### MPI Communication (CPU)
