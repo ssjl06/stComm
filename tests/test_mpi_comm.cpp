@@ -513,3 +513,134 @@ TEST_F(MPICommTest, SendRecvInt64) {
         }
     }
 }
+
+// ============================================================================
+// Bcast tests
+// ============================================================================
+
+TEST_F(MPICommTest, BcastInt) {
+    const int N = 100;
+    std::vector<int> buf(N);
+    if (rank == 0) {
+        for (int i = 0; i < N; ++i) buf[i] = i * 7 + 1;
+    }
+    auto req = comm->bcast(buf.data(), N, 0);
+    req->wait();
+    for (int i = 0; i < N; ++i) {
+        EXPECT_EQ(buf[i], i * 7 + 1) << "rank " << rank << " mismatch at " << i;
+    }
+}
+
+TEST_F(MPICommTest, BcastDouble) {
+    const int N = 64;
+    std::vector<double> buf(N);
+    if (rank == 0) {
+        for (int i = 0; i < N; ++i) buf[i] = 1.5 * i;
+    }
+    auto req = comm->bcast(buf.data(), N, 0);
+    req->wait();
+    for (int i = 0; i < N; ++i) {
+        EXPECT_DOUBLE_EQ(buf[i], 1.5 * i);
+    }
+}
+
+TEST_F(MPICommTest, BcastFromNonRootZero) {
+    // Broadcast from a non-zero root (only meaningful when size >= 2).
+    if (size < 2) GTEST_SKIP();
+    const int N = 50;
+    const int root = size - 1;
+    std::vector<int64_t> buf(N, -1);
+    if (rank == root) {
+        for (int i = 0; i < N; ++i) buf[i] = i * 13;
+    }
+    auto req = comm->bcast(buf.data(), N, root);
+    req->wait();
+    for (int i = 0; i < N; ++i) {
+        EXPECT_EQ(buf[i], i * 13);
+    }
+}
+
+// ============================================================================
+// AllreduceMaxloc tests
+// ============================================================================
+
+TEST_F(MPICommTest, AllreduceMaxlocLong) {
+    // Each rank reports a distinct value. Highest belongs to rank (size-1).
+    const long my_value = 100L + rank;
+    auto result = comm->allreduceMaxloc<long>(my_value);
+    EXPECT_EQ(result.first,  100L + (size - 1));
+    EXPECT_EQ(result.second, size - 1);
+}
+
+TEST_F(MPICommTest, AllreduceMaxlocInt64) {
+    // int64_t goes through `long` on LP64.
+    const int64_t my_value = 1000000000LL + rank * 1000000LL;
+    auto result = comm->allreduceMaxloc<int64_t>(my_value);
+    EXPECT_EQ(result.first,  1000000000LL + (size - 1) * 1000000LL);
+    EXPECT_EQ(result.second, size - 1);
+}
+
+TEST_F(MPICommTest, AllreduceMaxlocTiesPickSmallerRank) {
+    // All ranks report the same value → MPI_MAXLOC tie-break = smaller rank wins.
+    auto result = comm->allreduceMaxloc<long>(42L);
+    EXPECT_EQ(result.first,  42L);
+    EXPECT_EQ(result.second, 0);
+}
+
+TEST_F(MPICommTest, AllreduceMaxlocFloat) {
+    const float my_value = 0.5f + static_cast<float>(rank);
+    auto result = comm->allreduceMaxloc<float>(my_value);
+    EXPECT_FLOAT_EQ(result.first,  0.5f + static_cast<float>(size - 1));
+    EXPECT_EQ(result.second, size - 1);
+}
+
+TEST_F(MPICommTest, AllreduceMaxlocDouble) {
+    const double my_value = 1.25 * (rank + 1);
+    auto result = comm->allreduceMaxloc<double>(my_value);
+    EXPECT_DOUBLE_EQ(result.first,  1.25 * size);
+    EXPECT_EQ(result.second, size - 1);
+}
+
+// ============================================================================
+// Exscan tests
+// ============================================================================
+
+TEST_F(MPICommTest, ExscanSumInt64) {
+    // Each rank contributes (rank+1). Exclusive prefix sum at rank r is
+    // sum_{k=0..r-1}(k+1) = r*(r+1)/2. Rank 0 gets identity (0).
+    const int64_t my_value = rank + 1;
+    int64_t result = comm->exscan<int64_t>(my_value, MPI_SUM);
+    const int64_t expected = static_cast<int64_t>(rank) * (rank + 1) / 2;
+    EXPECT_EQ(result, expected);
+}
+
+TEST_F(MPICommTest, ExscanSumUint64) {
+    const uint64_t my_value = 100ULL + rank;
+    uint64_t result = comm->exscan<uint64_t>(my_value, MPI_SUM);
+    // exclusive prefix: sum_{k=0..r-1}(100 + k) = r*100 + r*(r-1)/2
+    const uint64_t expected = static_cast<uint64_t>(rank) * 100ULL
+                            + static_cast<uint64_t>(rank) * (rank - 1) / 2;
+    EXPECT_EQ(result, expected);
+}
+
+TEST_F(MPICommTest, ExscanRank0GetsIdentity) {
+    // For rank 0, exscan should return the operator identity (0 for SUM).
+    int64_t result = comm->exscan<int64_t>(999, MPI_SUM);
+    if (rank == 0) {
+        EXPECT_EQ(result, 0);
+    }
+}
+
+TEST_F(MPICommTest, ExscanMaxInt32) {
+    // Each rank contributes its own rank. MAX exclusive prefix at rank r is r-1 (or
+    // the MIN possible for rank 0).
+    int32_t my_value = rank;
+    int32_t result = comm->exscan<int32_t>(my_value, MPI_MAX);
+    if (rank == 0) {
+        // Identity behavior: we return T{} which is 0. MPI doesn't define the
+        // identity for MAX in general, but our implementation returns T{}.
+        EXPECT_EQ(result, 0);
+    } else {
+        EXPECT_EQ(result, rank - 1);
+    }
+}
