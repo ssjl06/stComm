@@ -512,6 +512,68 @@ TEST_F(NCCLCommTest, AllgathervFloat) {
     cudaFree(d_recvbuf);
 }
 
+// ============================================================================
+// Broadcast Tests
+// ============================================================================
+
+TEST_F(NCCLCommTest, BcastInt) {
+    const int N = 1024;
+    const int root = 0;
+
+    std::vector<int> h_data(N);
+    if (rank == root) fillRandom(h_data);  // non-root starts with zeros
+
+    int* d_data;
+    cudaMalloc(&d_data, N * sizeof(int));
+    cudaMemcpy(d_data, h_data.data(), N * sizeof(int), cudaMemcpyHostToDevice);
+
+    auto req = nccl_comm->bcast(d_data, N, root);
+    ASSERT_NE(req, nullptr);
+    req->wait();
+    EXPECT_EQ(req->getStatus(), stComm::Status::SUCCESS);
+
+    std::vector<int> h_out(N);
+    cudaMemcpy(h_out.data(), d_data, N * sizeof(int), cudaMemcpyDeviceToHost);
+
+    // Reference: same broadcast through MPI on host data.
+    std::vector<int> expected = h_data;
+    MPI_Bcast(expected.data(), N * sizeof(int), MPI_BYTE, root, MPI_COMM_WORLD);
+
+    for (int i = 0; i < N; ++i) {
+        EXPECT_EQ(h_out[i], expected[i]) << "Bcast mismatch at index " << i;
+    }
+
+    cudaFree(d_data);
+}
+
+TEST_F(NCCLCommTest, BcastUint64NonRootRoot) {
+    // Same as BcastInt but uses uint64_t (matches fullchipUSC ElementId) and
+    // a non-zero root rank (when available) to exercise root selection.
+    const int N = 256;
+    const int root = (size > 1) ? (size - 1) : 0;
+
+    std::vector<uint64_t> h_data(N);
+    if (rank == root) fillRandom(h_data);
+
+    uint64_t* d_data;
+    cudaMalloc(&d_data, N * sizeof(uint64_t));
+    cudaMemcpy(d_data, h_data.data(), N * sizeof(uint64_t), cudaMemcpyHostToDevice);
+
+    nccl_comm->bcast(d_data, N, root)->wait();
+
+    std::vector<uint64_t> h_out(N);
+    cudaMemcpy(h_out.data(), d_data, N * sizeof(uint64_t), cudaMemcpyDeviceToHost);
+
+    std::vector<uint64_t> expected = h_data;
+    MPI_Bcast(expected.data(), N * sizeof(uint64_t), MPI_BYTE, root, MPI_COMM_WORLD);
+
+    for (int i = 0; i < N; ++i) {
+        EXPECT_EQ(h_out[i], expected[i]) << "Bcast<uint64> mismatch at index " << i;
+    }
+
+    cudaFree(d_data);
+}
+
 TEST_F(NCCLCommTest, AlltoallvDouble) {
     const int count_per_rank = 30;
     std::vector<int> sendcounts(size, count_per_rank);

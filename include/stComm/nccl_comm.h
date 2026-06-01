@@ -72,6 +72,13 @@ public:
     RequestPtr alltoallv(const T* sendbuf, const int* sendcounts,
                         T* recvbuf, const int* recvcounts);
 
+    // Broadcast `count` elements of T from `root` to all ranks (async,
+    // device memory). In-place: `data` is both source on root and destination
+    // on every rank. Issued on the internal CUDA stream; call .wait() to
+    // synchronize.
+    template<typename T>
+    RequestPtr bcast(T* data, size_t count, int root);
+
     // Get native handle
     ncclComm_t getHandle() const { return comm_; }
 
@@ -190,6 +197,20 @@ RequestPtr NCCLComm::alltoallv(const T* sendbuf, const int* sendcounts,
         }
     }
     ncclGroupEnd();
+
+    return req;
+}
+
+template<typename T>
+RequestPtr NCCLComm::bcast(T* data, size_t count, int root) {
+    if (!initialized_) {
+        return nullptr;
+    }
+
+    auto req = std::make_shared<NCCLRequest>(stream_);
+
+    ncclDataType_t nccl_type = NCCLTypeMap<T>::type();
+    ncclBroadcast(data, data, count, nccl_type, root, comm_, stream_);
 
     return req;
 }
