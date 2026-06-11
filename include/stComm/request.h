@@ -30,6 +30,17 @@ public:
      */
     virtual Status getStatus() const = 0;
 
+    /**
+     * @brief Identify the backend that produced this request.
+     *
+     * Lets an advanced caller holding a base RequestPtr (e.g. host and device
+     * requests stored together in a type-erased queue) discover the concrete
+     * type and safely downcast to reach a backend-specific sync handle
+     * (MPIRequest::getHandle / NCCLRequest::getStream). The common path never
+     * needs this — just call wait().
+     */
+    virtual Backend getBackend() const = 0;
+
 protected:
     Request() = default;
 };
@@ -64,6 +75,8 @@ public:
     Status getStatus() const override {
         return status_;
     }
+
+    Backend getBackend() const override { return Backend::MPI; }
 
     MPI_Request& getHandle() { return req_; }
 
@@ -108,6 +121,8 @@ public:
         return status_;
     }
 
+    Backend getBackend() const override { return Backend::MPI; }
+
 private:
     std::vector<MPI_Request> requests_;
     Status status_;
@@ -143,6 +158,8 @@ public:
     Status getStatus() const override {
         return status_;
     }
+
+    Backend getBackend() const override { return Backend::NCCL; }
 
     cudaStream_t getStream() const { return stream_; }
 

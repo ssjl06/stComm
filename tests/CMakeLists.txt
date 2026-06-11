@@ -15,6 +15,7 @@ set(TEST_SOURCES
     main.cpp
     test_mpi_comm.cpp
     test_nccl_comm.cpp
+    test_comm.cpp
 )
 
 # Create test executable

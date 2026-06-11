@@ -14,6 +14,19 @@ enum class Backend {
 };
 
 /**
+ * @brief Reduction operation, backend-agnostic.
+ *
+ * Lets callers request a reduction without naming MPI_Op / ncclRedOp_t. The
+ * Comm facade maps it to the concrete backend op internally.
+ */
+enum class ReduceOp {
+    Sum,
+    Max,
+    Min,
+    Prod
+};
+
+/**
  * @brief Operation status
  */
 enum class Status {
