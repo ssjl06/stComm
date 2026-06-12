@@ -70,25 +70,25 @@ public:
     // Point-to-point communication (async)
     // Automatically handles large data (>2GB) by chunking
     template<typename T>
-    RequestPtr send(const T* data, size_t count, int dest, int tag = 0);
+    std::shared_ptr<MPIRequest> send(const T* data, size_t count, int dest, int tag = 0);
 
     template<typename T>
-    RequestPtr recv(T* data, size_t count, int source, int tag = 0);
+    std::shared_ptr<MPIRequest> recv(T* data, size_t count, int source, int tag = 0);
 
     // Collective communication - with auto displacement
     // Automatically handles large data (>2GB) by chunking
     template<typename T>
-    RequestPtr allgatherv(const T* sendbuf, int sendcount,
+    std::shared_ptr<MPIRequest> allgatherv(const T* sendbuf, int sendcount,
                          T* recvbuf, const int* recvcounts);
 
     template<typename T>
-    RequestPtr alltoallv(const T* sendbuf, const int* sendcounts,
+    std::shared_ptr<MPIRequest> alltoallv(const T* sendbuf, const int* sendcounts,
                         T* recvbuf, const int* recvcounts);
 
     // Broadcast `count` elements of T from `root` to all ranks (async).
     // Automatically handles large data (>2GB) by chunking.
     template<typename T>
-    RequestPtr bcast(T* data, size_t count, int root);
+    std::shared_ptr<MPIRequest> bcast(T* data, size_t count, int root);
 
     // Allreduce with MPI_MAXLOC. Pairs the caller's `value` with this rank's id.
     // Returns (max value across ranks, rank that owned that max). Tie-breaking:
@@ -101,6 +101,17 @@ public:
     // identity (zero for MPI_SUM). Blocking — payload is one element.
     template<typename T>
     T exscan(T value, MPI_Op op = MPI_SUM);
+
+    // Async variants of the two reductions above (MPI_Iallreduce / MPI_Iexscan).
+    // The scalar result lands in *out once the returned request completes
+    // (wait()/test()); the request owns the backing buffers until then. Same
+    // shape as NCCLComm's emulated reductions so the Comm facade routes both by
+    // Space tag.
+    template<typename T>
+    std::shared_ptr<MPIRequest> allreduceMaxloc(T value, std::pair<T, int>* out);
+
+    template<typename T>
+    std::shared_ptr<MPIRequest> exscan(T value, T* out, MPI_Op op = MPI_SUM);
 
     // Get native handle
     MPI_Comm getHandle() const { return comm_; }
@@ -116,7 +127,7 @@ private:
 // ============================================================================
 
 template<typename T>
-RequestPtr MPIComm::send(const T* data, size_t count, int dest, int tag) {
+std::shared_ptr<MPIRequest> MPIComm::send(const T* data, size_t count, int dest, int tag) {
     static_assert(std::is_trivially_copyable<T>::value,
                   "Type must be trivially copyable for MPI communication");
 
@@ -131,24 +142,22 @@ RequestPtr MPIComm::send(const T* data, size_t count, int dest, int tag) {
         return req;
     }
 
-    // Large data: split into chunks
-    auto multi_req = std::make_shared<MultiMPIRequest>();
+    // Large data: split into chunks, all tracked by one MPIRequest.
+    auto req = std::make_shared<MPIRequest>();
     const char* byte_data = reinterpret_cast<const char*>(data);
     size_t offset = 0;
 
     while (offset < total_bytes) {
         size_t chunk_size = std::min(MAX_CHUNK_SIZE, total_bytes - offset);
-        MPI_Request mpi_req;
-        MPI_Isend(byte_data + offset, static_cast<int>(chunk_size), MPI_BYTE, dest, tag, comm_, &mpi_req);
-        multi_req->addRequest(mpi_req);
+        MPI_Isend(byte_data + offset, static_cast<int>(chunk_size), MPI_BYTE, dest, tag, comm_, &req->addHandle());
         offset += chunk_size;
     }
 
-    return multi_req;
+    return req;
 }
 
 template<typename T>
-RequestPtr MPIComm::recv(T* data, size_t count, int source, int tag) {
+std::shared_ptr<MPIRequest> MPIComm::recv(T* data, size_t count, int source, int tag) {
     static_assert(std::is_trivially_copyable<T>::value,
                   "Type must be trivially copyable for MPI communication");
 
@@ -163,24 +172,22 @@ RequestPtr MPIComm::recv(T* data, size_t count, int source, int tag) {
         return req;
     }
 
-    // Large data: split into chunks
-    auto multi_req = std::make_shared<MultiMPIRequest>();
+    // Large data: split into chunks, all tracked by one MPIRequest.
+    auto req = std::make_shared<MPIRequest>();
     char* byte_data = reinterpret_cast<char*>(data);
     size_t offset = 0;
 
     while (offset < total_bytes) {
         size_t chunk_size = std::min(MAX_CHUNK_SIZE, total_bytes - offset);
-        MPI_Request mpi_req;
-        MPI_Irecv(byte_data + offset, static_cast<int>(chunk_size), MPI_BYTE, source, tag, comm_, &mpi_req);
-        multi_req->addRequest(mpi_req);
+        MPI_Irecv(byte_data + offset, static_cast<int>(chunk_size), MPI_BYTE, source, tag, comm_, &req->addHandle());
         offset += chunk_size;
     }
 
-    return multi_req;
+    return req;
 }
 
 template<typename T>
-RequestPtr MPIComm::allgatherv(const T* sendbuf, int sendcount,
+std::shared_ptr<MPIRequest> MPIComm::allgatherv(const T* sendbuf, int sendcount,
                                T* recvbuf, const int* recvcounts) {
     static_assert(std::is_trivially_copyable<T>::value,
                   "Type must be trivially copyable for MPI communication");
@@ -207,7 +214,7 @@ RequestPtr MPIComm::allgatherv(const T* sendbuf, int sendcount,
 }
 
 template<typename T>
-RequestPtr MPIComm::alltoallv(const T* sendbuf, const int* sendcounts,
+std::shared_ptr<MPIRequest> MPIComm::alltoallv(const T* sendbuf, const int* sendcounts,
                               T* recvbuf, const int* recvcounts) {
     static_assert(std::is_trivially_copyable<T>::value,
                   "Type must be trivially copyable for MPI communication");
@@ -239,7 +246,7 @@ RequestPtr MPIComm::alltoallv(const T* sendbuf, const int* sendcounts,
 }
 
 template<typename T>
-RequestPtr MPIComm::bcast(T* data, size_t count, int root) {
+std::shared_ptr<MPIRequest> MPIComm::bcast(T* data, size_t count, int root) {
     static_assert(std::is_trivially_copyable<T>::value,
                   "Type must be trivially copyable for MPI communication");
 
@@ -253,18 +260,16 @@ RequestPtr MPIComm::bcast(T* data, size_t count, int root) {
         return req;
     }
 
-    auto multi_req = std::make_shared<MultiMPIRequest>();
+    auto req = std::make_shared<MPIRequest>();
     char* byte_data = reinterpret_cast<char*>(data);
     size_t offset = 0;
     while (offset < total_bytes) {
         size_t chunk_size = std::min(MAX_CHUNK_SIZE, total_bytes - offset);
-        MPI_Request mpi_req;
         MPI_Ibcast(byte_data + offset, static_cast<int>(chunk_size), MPI_BYTE,
-                   root, comm_, &mpi_req);
-        multi_req->addRequest(mpi_req);
+                   root, comm_, &req->addHandle());
         offset += chunk_size;
     }
-    return multi_req;
+    return req;
 }
 
 template<typename T>
@@ -286,6 +291,44 @@ T MPIComm::exscan(T value, MPI_Op op) {
     MPI_Exscan(&value, &result, 1, detail::mpi_datatype<T>(), op, comm_);
     // MPI_Exscan leaves rank 0's recvbuf undefined; return identity (zero) instead.
     return rank_ == 0 ? T{} : result;
+}
+
+template<typename T>
+std::shared_ptr<MPIRequest> MPIComm::allreduceMaxloc(T value, std::pair<T, int>* out) {
+    using MPIValue = typename detail::maxloc_value_cast<T>::type;
+    struct Pair { MPIValue value; int rank; };
+    // Buffers must outlive the non-blocking call; the request owns them.
+    struct Buf { Pair local; Pair global; };
+    auto buf = std::make_shared<Buf>();
+    buf->local = Pair{static_cast<MPIValue>(value), rank_};
+
+    auto req = std::make_shared<MPIRequest>();
+    MPI_Iallreduce(&buf->local, &buf->global, 1,
+                   detail::mpi_pair_datatype<MPIValue>(), MPI_MAXLOC,
+                   comm_, &req->addHandle());
+    req->setScratch(buf);
+    req->setFinalizer([buf, out]() {
+        *out = { static_cast<T>(buf->global.value), buf->global.rank };
+    });
+    return req;
+}
+
+template<typename T>
+std::shared_ptr<MPIRequest> MPIComm::exscan(T value, T* out, MPI_Op op) {
+    struct Buf { T send; T recv; };
+    auto buf = std::make_shared<Buf>();
+    buf->send = value;
+
+    auto req = std::make_shared<MPIRequest>();
+    MPI_Iexscan(&buf->send, &buf->recv, 1, detail::mpi_datatype<T>(), op,
+                comm_, &req->addHandle());
+    const int rank = rank_;
+    req->setScratch(buf);
+    req->setFinalizer([buf, out, rank]() {
+        // MPI_Iexscan leaves rank 0's recvbuf undefined; return identity.
+        *out = (rank == 0) ? T{} : buf->recv;
+    });
+    return req;
 }
 
 } // namespace stComm

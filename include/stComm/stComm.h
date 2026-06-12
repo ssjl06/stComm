@@ -13,6 +13,7 @@
 #include "stComm/comm_base.h"
 #include "stComm/mpi_comm.h"
 #include "stComm/nccl_comm.h"
+#include "stComm/comm.h"
 
 namespace stComm {
 
