@@ -55,22 +55,22 @@ inline MPI_Op to_mpi_op(ReduceOp op) {
  * CUDA streams. Backend specifics live on the backend objects, reachable by
  * advanced callers through the mpi() / nccl() escape hatches.
  *
- * Capability note: NCCL has no MAXLOC or scan primitive, so `allreduceMaxloc`
- * and `exscan` currently run on the MPI (host) backend only. Device variants are
- * a planned follow-up — adding them will give those two methods a Space tag too.
+ * Capability note: NCCL has no native MAXLOC or scan primitive, so the device
+ * `allreduceMaxloc` / `exscan` are emulated (gather + host-side reduce); both
+ * Spaces are async and return the corresponding request.
  */
 class Comm {
 public:
-    /// @brief Request type returned by a space-selecting collective.
+    /// @brief Request type returned by a space-selecting operation.
     ///
-    /// Device collectives always produce an NCCLRequest, so the return is the
-    /// concrete `shared_ptr<NCCLRequest>` — no cast needed to reach getStream().
-    /// Host collectives may return MPIRequest or (for >2GB chunked transfers)
-    /// MultiMPIRequest, so the return stays the base RequestPtr; identify the
-    /// concrete type via Request::getBackend() if a native handle is needed.
+    /// Symmetric and concrete on both sides: Host yields `shared_ptr<MPIRequest>`,
+    /// Device yields `shared_ptr<NCCLRequest>` — no cast needed to reach a native
+    /// sync handle (MPIRequest::getHandle / NCCLRequest::getStream). A single
+    /// MPIRequest tracks 1..N MPI_Request handles, so even >2GB chunked transfers
+    /// stay one concrete type.
     template<Space Sp>
     using RequestPtrFor =
-        std::conditional_t<Sp == Space::Device, std::shared_ptr<NCCLRequest>, RequestPtr>;
+        std::conditional_t<Sp == Space::Device, NCCLRequestPtr, MPIRequestPtr>;
 
     // ---- Lifecycle (hides "MPI" from the init/finalize vocabulary) ----------
     static void initialize(int* argc, char*** argv) { MPIComm::initialize(argc, argv); }
@@ -105,48 +105,44 @@ public:
     //   Sp == Host   → host memory via MPI
     //   Sp == Device → device memory via NCCL (requires a device-enabled Comm)
 
+    // Backends return their concrete request type already, so each branch
+    // forwards directly — no cast, the RequestPtrFor<Sp> return type just lines
+    // up with whichever backend handled it.
     template<Space Sp, typename T>
     RequestPtrFor<Sp> bcast(T* data, std::size_t count, int root) {
-        if constexpr (Sp == Space::Device) {
-            assert(nccl_);
-            return std::static_pointer_cast<NCCLRequest>(nccl_->bcast(data, count, root));
-        } else {
-            return mpi_->bcast(data, count, root);
-        }
+        if constexpr (Sp == Space::Device) { assert(nccl_); return nccl_->bcast(data, count, root); }
+        else                                 return mpi_->bcast(data, count, root);
     }
 
     template<Space Sp, typename T>
     RequestPtrFor<Sp> allgatherv(const T* sendbuf, int sendcount,
                                  T* recvbuf, const int* recvcounts) {
-        if constexpr (Sp == Space::Device) {
-            assert(nccl_);
-            return std::static_pointer_cast<NCCLRequest>(
-                nccl_->allgatherv(sendbuf, sendcount, recvbuf, recvcounts));
-        } else {
-            return mpi_->allgatherv(sendbuf, sendcount, recvbuf, recvcounts);
-        }
+        if constexpr (Sp == Space::Device) { assert(nccl_); return nccl_->allgatherv(sendbuf, sendcount, recvbuf, recvcounts); }
+        else                                 return mpi_->allgatherv(sendbuf, sendcount, recvbuf, recvcounts);
     }
 
     template<Space Sp, typename T>
     RequestPtrFor<Sp> alltoallv(const T* sendbuf, const int* sendcounts,
                                 T* recvbuf, const int* recvcounts) {
-        if constexpr (Sp == Space::Device) {
-            assert(nccl_);
-            return std::static_pointer_cast<NCCLRequest>(
-                nccl_->alltoallv(sendbuf, sendcounts, recvbuf, recvcounts));
-        } else {
-            return mpi_->alltoallv(sendbuf, sendcounts, recvbuf, recvcounts);
-        }
+        if constexpr (Sp == Space::Device) { assert(nccl_); return nccl_->alltoallv(sendbuf, sendcounts, recvbuf, recvcounts); }
+        else                                 return mpi_->alltoallv(sendbuf, sendcounts, recvbuf, recvcounts);
     }
 
-    // ---- Host control-plane ops (no NCCL primitive) ---------------------
-    // Device variants are a planned follow-up (will add a Space tag).
-    template<typename T>
-    std::pair<T, int> allreduceMaxloc(T value) { return mpi_->allreduceMaxloc(value); }
+    // ---- Space-selecting reductions (async) -----------------------------
+    // Like the collectives above, these return a request; the scalar result is
+    // delivered to *out once it completes. Host uses MPI_Iallreduce/Iexscan;
+    // Device emulates via ncclAllGather + a host-side reduce (NCCL has no native
+    // MAXLOC/scan). ReduceOp is mapped to the MPI op on the host path.
+    template<Space Sp, typename T>
+    RequestPtrFor<Sp> allreduceMaxloc(T value, std::pair<T, int>* out) {
+        if constexpr (Sp == Space::Device) { assert(nccl_); return nccl_->allreduceMaxloc(value, out); }
+        else                                 return mpi_->allreduceMaxloc(value, out);
+    }
 
-    template<typename T>
-    T exscan(T value, ReduceOp op = ReduceOp::Sum) {
-        return mpi_->exscan(value, detail::to_mpi_op(op));
+    template<Space Sp, typename T>
+    RequestPtrFor<Sp> exscan(T value, T* out, ReduceOp op = ReduceOp::Sum) {
+        if constexpr (Sp == Space::Device) { assert(nccl_); return nccl_->exscan(value, out, op); }
+        else                                 return mpi_->exscan(value, out, detail::to_mpi_op(op));
     }
 
     // ---- Backend escape hatches for backend-specific APIs ---------------

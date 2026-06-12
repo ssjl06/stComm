@@ -1,9 +1,15 @@
 # stComm — Unified `Comm` Facade 설계 (작업 핸드오프)
 
-> 상태: **stComm `Comm` facade 구현 완료(v2).** §5 수정 목록 전부 적용, §7 결정 확정.
-> 빌드 통과 + 전 템플릿 경로 컴파일-온리 인스턴스화 검증됨(실행 검증은 GPU+mpirun 필요, 미실행).
+> 상태: **stComm `Comm` facade 구현 완료(v3).** §5 수정 목록 전부 적용, §7 결정 확정.
+> v3 추가: (1) **NCCL device MAXLOC/exscan emulate 구현**(§7.5 해소, AllGather+host reduce),
+> (2) **reduction async 통일**(maxloc/exscan도 Request 반환, 결과는 out-param),
+> (3) **Request 모듈화**: `MultiMPIRequest` 폐지 → `MPIRequest`가 `vector<MPI_Request>` 보유,
+> leaf 클래스 정확히 둘(`MPIRequest`/`NCCLRequest`)·둘 다 `Request` 상속, facade 반환 대칭
+> (host→`MPIRequestPtr`, device→`NCCLRequestPtr`), 두 request에 async용 `scratch`+`finalizer` 훅.
+> 빌드 통과 + `mpirun -n 2` 35 PASS / 20 SKIP(device, 1-GPU 박스). device 런타임 검증은 2-GPU 필요.
 > 범위: **stComm 레포만.** fullchipUSC 마이그레이션(Phase 2)은 이후 별도 작업.
-> 구현 파일: `include/stComm/comm.h`(facade), `types.h`(`ReduceOp`), `request.h`(`getBackend()` 태그), `stComm.h`(include).
+> 구현 파일: `comm.h`(facade), `types.h`(`ReduceOp`), `request.h`(`MPIRequest`/`NCCLRequest` + `getBackend()`/scratch/finalizer),
+> `mpi_comm.h`/`nccl_comm.h`(async reduction), `stComm.h`(include), `tests/test_comm.cpp`.
 
 ---
 
@@ -152,24 +158,28 @@ private:
 
 1. ~~**"pool"의 노출 형태**~~ → ✅ **래퍼 참조만**(`mpi()/nccl()`). raw 핸들은 백엔드 `getHandle()`로. (4b)
 2. ~~**Request 백엔드별 sync 노출 방식**~~ → ✅ **Option 2**(Space별 반환 타입) + base `Request::getBackend()` 태그. (4c)
+   추가로 **모든 연산(collective+reduction) async/Request 반환으로 통일**, reduction 결과는 out-param.
 3. ~~**`ReduceOp` 위치**~~ → ✅ **`types.h`**(재사용성).
 4. **device_id 자동 선택**(`rank % numGPUs`) 제공 여부 — 지금은 명시 인자, 자동은 YAGNI. (미정, 보류)
-5. **NCCL MAXLOC/exscan device 변형** — 후속(별도). 라이브러리 완전성 차원에서 언젠가 구현하되
-   AllGather+로컬 reduce 방식(타입무관·정확) 권장, 비트팩 ncclMax는 최적화. 단 이 박스(2×L4,
-   no-NVLink)에선 small-msg latency 때문에 host보다 느림 → **L4에선 채택 X, NVLink에서 의미**.
+5. ~~**NCCL MAXLOC/exscan device 변형**~~ → ✅ **구현됨**: AllGather+host reduce(타입무관·정확), async.
+   `scratch`(gather 버퍼 수명)+`finalizer`(완료 후 host reduce) 훅으로 단일 `NCCLRequest`에 담음.
+   ⚠️ 성능 주의 유지: 이 방식은 small-msg latency로 **L4(no-NVLink)에선 host보다 느릴 수 있음** →
+   완전성용. 비트팩 `ncclMax` 최적화는 미적용(NVLink에서나 의미). int16/uint16은 `NCCLTypeMap`이
+   32-bit로 매핑하는 기존 한계가 있어 reduction은 int32/int64/float/double 등에서 사용 권장.
 
 ## 8. 구현/검증 메모
 
 - 빌드: `cd ~/tickets/stComm && ./build.sh` → 설치: `./install.sh ~/install/stComm`.
 - 툴체인 확인됨: `nvcc`(/usr/local/cuda), `mpicxx`(/usr/local/bin), `nccl.h`(/usr/include).
   CUDA arch 기본값 `75;80;89`에 L4(89) 포함. C++ standard: CUDA 17 → `if constexpr` OK.
-- ✅ 빌드 통과 + 전 템플릿 경로 컴파일-온리 인스턴스화 검증(host/device 모두).
-- ✅ **facade 단위테스트 추가됨**: `tests/test_comm.cpp` (CMake에 등록). host `bcast/allgatherv/
-  alltoallv` + `allreduceMaxloc` + `exscan(ReduceOp)` + `Request::getBackend()` 태그를 해석적
-  기대값과 대조. device `bcast<Space::Device>`는 concrete `NCCLRequest`/`getStream()`까지 검증하되
-  랭크별 GPU 부족 시 `GTEST_SKIP`.
-- ✅ **실행 결과(이 박스, 단일 MX450)**: `mpirun -n 2`에서 host 6개 PASS, device 1개 SKIP, 기존 29 PASS 회귀 없음.
-  ⚠️ **device 경로 런타임 검증은 2-GPU 박스 필요**(`NCCL_P2P_DISABLE=1`) — 아직 미실행.
+- ✅ 빌드 통과 + 전 템플릿 경로 컴파일 검증(host/device 모두; device reduction 포함).
+- ✅ **facade 단위테스트**: `tests/test_comm.cpp` (CMake 등록). host `bcast/allgatherv/alltoallv` +
+  async `allreduceMaxloc`/`exscan(ReduceOp)`(out-param→`wait()`) + `Request::getBackend()` 태그를
+  해석적 기대값과 대조. device `bcast`/`allreduceMaxloc`/`exscan`는 concrete `NCCLRequest`/`getStream()`
+  까지 검증하되 랭크별 GPU 부족 시 `GTEST_SKIP`.
+- ✅ **실행 결과(이 박스, 단일 MX450)**: `mpirun -n 2` → **35 PASS / 20 SKIP**(device), 회귀 0, FAILED 0.
+  ⚠️ **device 경로(NCCL collective + emulate reduction) 런타임 검증은 2-GPU 박스 필요**
+  (`NCCL_P2P_DISABLE=1`) — 컴파일·타입은 검증됐으나 런타임 정확성은 아직 미실행.
 
 ## 9. 스코프 경계
 
@@ -177,4 +187,4 @@ private:
 - **Phase 2 (후속)**: fullchipUSC를 `Comm`으로 전환 — `USCSolver` de-template화,
   `main.cpp`/`tests`의 수동 NCCL 부트스트랩을 `Comm::onDevice`로 축소, 27 ctest + 4스케일
   `selected` bit-identical(353/5378/14889/35824) 검증. **이 작업은 별도 세션.**
-- **후속**: NCCL device MAXLOC/exscan (§7.5).
+- ~~**후속**: NCCL device MAXLOC/exscan (§7.5)~~ → ✅ 구현 완료(v3). 남은 검증: 2-GPU 박스 런타임.

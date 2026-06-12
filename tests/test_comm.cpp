@@ -59,8 +59,8 @@ TEST_F(CommFacadeTest, BcastHost) {
         for (int i = 0; i < n; ++i) buf[i] = 1000 + i;
 
     auto req = comm.bcast<Space::Host>(buf.data(), n, root);
-    // Host return is the base RequestPtr that self-identifies as MPI.
-    static_assert(std::is_same_v<decltype(req), stComm::RequestPtr>);
+    // Host return is the concrete MPIRequest, symmetric with the device side.
+    static_assert(std::is_same_v<decltype(req), stComm::MPIRequestPtr>);
     EXPECT_EQ(req->getBackend(), Backend::MPI);
     req->wait();
 
@@ -102,32 +102,39 @@ TEST_F(CommFacadeTest, AlltoallvHost) {
             EXPECT_EQ(recv[i * per + k], i * 100 + rank * 10 + k) << "from " << i << " elem " << k;
 }
 
-TEST_F(CommFacadeTest, AllreduceMaxloc) {
+TEST_F(CommFacadeTest, AllreduceMaxlocHost) {
     Comm comm;
+    // Async: result lands in the out-param once the request completes.
     // value == rank → max lives on the highest rank, no ties.
-    auto hi = comm.allreduceMaxloc<double>(static_cast<double>(rank));
+    std::pair<double, int> hi;
+    comm.allreduceMaxloc<Space::Host>(static_cast<double>(rank), &hi)->wait();
     EXPECT_DOUBLE_EQ(hi.first, static_cast<double>(size - 1));
     EXPECT_EQ(hi.second, size - 1);
 
     // value == -rank → max lives on rank 0.
-    auto lo = comm.allreduceMaxloc<double>(-static_cast<double>(rank));
+    std::pair<double, int> lo;
+    comm.allreduceMaxloc<Space::Host>(-static_cast<double>(rank), &lo)->wait();
     EXPECT_DOUBLE_EQ(lo.first, 0.0);
     EXPECT_EQ(lo.second, 0);
 }
 
-TEST_F(CommFacadeTest, ExscanReduceOp) {
+TEST_F(CommFacadeTest, ExscanReduceOpHost) {
     Comm comm;
     const int v = rank + 1;  // ranks contribute 1, 2, 3, ...
 
     // Sum: exclusive prefix sum of (k+1) for k < rank; rank 0 → identity 0.
     int expSum = 0;
     for (int k = 0; k < rank; ++k) expSum += (k + 1);
-    EXPECT_EQ(comm.exscan<int>(v, ReduceOp::Sum), expSum);
+    int gotSum = -1;
+    comm.exscan<Space::Host>(v, &gotSum, ReduceOp::Sum)->wait();
+    EXPECT_EQ(gotSum, expSum);
 
     // Max: prefix max of (k+1); rank 0 → identity 0 (MPI_Exscan leaves it unset,
     // MPIComm returns T{}).
     int expMax = (rank == 0) ? 0 : rank;  // max of {1..rank} == rank
-    EXPECT_EQ(comm.exscan<int>(v, ReduceOp::Max), expMax);
+    int gotMax = -1;
+    comm.exscan<Space::Host>(v, &gotMax, ReduceOp::Max)->wait();
+    EXPECT_EQ(gotMax, expMax);
 }
 
 // ============================================================================
@@ -155,7 +162,7 @@ TEST_F(CommFacadeTest, BcastDevice) {
 
     auto req = comm.bcast<Space::Device>(dbuf, n, root);
     // Device return is the concrete NCCLRequest — getStream() with no cast.
-    static_assert(std::is_same_v<decltype(req), std::shared_ptr<NCCLRequest>>);
+    static_assert(std::is_same_v<decltype(req), stComm::NCCLRequestPtr>);
     EXPECT_EQ(req->getBackend(), Backend::NCCL);
     EXPECT_NE(req->getStream(), nullptr);
     req->wait();
@@ -164,4 +171,26 @@ TEST_F(CommFacadeTest, BcastDevice) {
     for (int i = 0; i < n; ++i) EXPECT_EQ(host[i], 2000 + i);
 
     cudaFree(dbuf);
+}
+
+TEST_F(CommFacadeTest, ReductionsDevice) {
+    if (!deviceUsable())
+        GTEST_SKIP() << "needs " << size << " GPUs, have " << num_gpus;
+
+    Comm comm = Comm::onDevice(rank);
+    cudaSetDevice(rank);
+
+    // Emulated MAXLOC: value == rank → max on the highest rank. Result is
+    // delivered to the host out-param once the (stream-backed) request drains.
+    std::pair<double, int> hi;
+    comm.allreduceMaxloc<Space::Device>(static_cast<double>(rank), &hi)->wait();
+    EXPECT_DOUBLE_EQ(hi.first, static_cast<double>(size - 1));
+    EXPECT_EQ(hi.second, size - 1);
+
+    // Emulated exclusive scan (Sum): prefix sum of (k+1) for k < rank.
+    int expSum = 0;
+    for (int k = 0; k < rank; ++k) expSum += (k + 1);
+    int gotSum = -1;
+    comm.exscan<Space::Device>(rank + 1, &gotSum, ReduceOp::Sum)->wait();
+    EXPECT_EQ(gotSum, expSum);
 }
