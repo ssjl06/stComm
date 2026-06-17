@@ -1,12 +1,12 @@
 /**
  * @file nccl_collective.cpp
- * @brief GPU collective communication using NCCL
+ * @brief GPU collective communication via the stComm::Comm facade.
  *
- * This example demonstrates:
- * - NCCL allgatherv with automatic displacement calculation
- * - NCCL alltoallv for all-to-all GPU communication
- * - Working with device memory
- * - Variable-sized collective operations on GPU
+ * Demonstrates:
+ * - Device-enabled Comm via Comm::onDevice (NCCL bootstrap is internal)
+ * - allgatherv<Space::Device> / alltoallv<Space::Device>: the same facade
+ *   collectives as the host example, routed to NCCL by the Space tag
+ * - Working with device memory and automatic displacement calculation
  */
 
 #include "stComm/stComm.h"
@@ -15,39 +15,27 @@
 #include <cuda_runtime.h>
 
 int main(int argc, char** argv) {
-    // Initialize MPI for coordination
-    stComm::MPIComm::initialize(&argc, &argv);
+    stComm::Comm::initialize(&argc, &argv);
 
-    stComm::MPIComm mpi_comm;
-    int rank = mpi_comm.getRank();
-    int size = mpi_comm.getSize();
+    // Probe rank/size on a host-only Comm to pick the device and guard on GPUs.
+    int rank = 0, size = 0;
+    { stComm::Comm probe; rank = probe.getRank(); size = probe.getSize(); }
 
-    // Check GPU availability
     int num_gpus = 0;
     cudaGetDeviceCount(&num_gpus);
-
     if (size > num_gpus) {
         if (rank == 0) {
             std::cerr << "Error: Need " << size << " GPUs but only "
                       << num_gpus << " available" << std::endl;
         }
-        stComm::MPIComm::finalize();
+        stComm::Comm::finalize();
         return 1;
     }
 
-    // Each rank uses its own GPU
+    // Each rank uses its own GPU. onDevice bootstraps NCCL on it internally.
     int device_id = rank;
     cudaSetDevice(device_id);
-
-    // Setup NCCL communicator
-    ncclUniqueId nccl_id;
-    if (rank == 0) {
-        nccl_id = stComm::NCCLComm::getUniqueId();
-    }
-    MPI_Bcast(&nccl_id, sizeof(nccl_id), MPI_BYTE, 0, MPI_COMM_WORLD);
-
-    stComm::NCCLComm nccl_comm;
-    nccl_comm.initialize(rank, size, device_id, nccl_id);
+    stComm::Comm comm = stComm::Comm::onDevice(device_id);
 
     std::cout << "=== GPU " << device_id << " (Rank " << rank
               << ") starting collective operations ===" << std::endl;
@@ -81,10 +69,9 @@ int main(int argc, char** argv) {
         cudaMemcpy(d_sendbuf, h_sendbuf.data(), sendcount * sizeof(int),
                    cudaMemcpyHostToDevice);
 
-        // Perform allgatherv (displacement automatically calculated)
-        auto req = nccl_comm.allgatherv(d_sendbuf, sendcount,
-                                        d_recvbuf, recvcounts.data());
-        req->wait();
+        // allgatherv on device memory — Space::Device routes it to NCCL.
+        comm.allgatherv<stComm::Space::Device>(d_sendbuf, sendcount,
+                                                 d_recvbuf, recvcounts.data())->wait();
 
         // Verify results
         std::vector<int> h_recvbuf(total_recv);
@@ -144,10 +131,9 @@ int main(int argc, char** argv) {
         cudaMemcpy(d_sendbuf, h_sendbuf.data(), total_send * sizeof(int),
                    cudaMemcpyHostToDevice);
 
-        // Perform alltoallv (displacement automatically calculated)
-        auto req = nccl_comm.alltoallv(d_sendbuf, sendcounts.data(),
-                                       d_recvbuf, recvcounts.data());
-        req->wait();
+        // alltoallv on device memory — Space::Device routes it to NCCL.
+        comm.alltoallv<stComm::Space::Device>(d_sendbuf, sendcounts.data(),
+                                                d_recvbuf, recvcounts.data())->wait();
 
         // Verify results
         std::vector<int> h_recvbuf(total_recv);
@@ -181,6 +167,6 @@ int main(int argc, char** argv) {
     std::cout << "\nGPU " << device_id << ": All collective operations completed successfully!"
               << std::endl;
 
-    stComm::MPIComm::finalize();
+    stComm::Comm::finalize();
     return 0;
 }
