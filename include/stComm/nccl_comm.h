@@ -1,6 +1,7 @@
 #pragma once
 
-#include "comm_base.h"
+#include "types.h"
+#include "request.h"
 #include "utils.h"
 #include <nccl.h>
 #include <cuda_runtime.h>
@@ -53,20 +54,25 @@ template<> inline ncclDataType_t NCCLTypeMap<double>::type() { return ncclFloat6
  * Implements communication using NCCL for device memory.
  * All data pointers must point to GPU memory.
  */
-class NCCLComm : public CommBase {
+class NCCLComm {
 public:
     NCCLComm();
-    ~NCCLComm() override;
+    ~NCCLComm();
+
+    // Owns a ncclComm_t + CUDA stream that the destructor frees, so copying
+    // would double-free — non-copyable.
+    NCCLComm(const NCCLComm&)            = delete;
+    NCCLComm& operator=(const NCCLComm&) = delete;
 
     // Initialization
     void initialize(int rank, int nranks, int device_id, ncclUniqueId comm_id);
     static ncclUniqueId getUniqueId();
 
-    // CommBase interface
-    int getRank() const override { return rank_; }
-    int getSize() const override { return size_; }
-    Backend getBackend() const override { return Backend::NCCL; }
-    void barrier() override;
+    // Scalar accessors
+    int getRank() const { return rank_; }
+    int getSize() const { return size_; }
+    Backend getBackend() const { return Backend::NCCL; }
+    void barrier();
 
     // Point-to-point communication (async, device memory)
     // Uses internal CUDA stream created during initialization

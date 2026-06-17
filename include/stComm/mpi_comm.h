@@ -1,6 +1,7 @@
 #pragma once
 
-#include "comm_base.h"
+#include "types.h"
+#include "request.h"
 #include "utils.h"
 #include <mpi.h>
 #include <vector>
@@ -51,21 +52,26 @@ template<>           struct maxloc_value_cast<unsigned long long> { using type =
  * Implements communication using MPI for host memory.
  * Uses MPI_BYTE to handle arbitrary data sizes efficiently.
  */
-class MPIComm : public CommBase {
+class MPIComm {
 public:
     MPIComm();
     explicit MPIComm(MPI_Comm comm);
-    ~MPIComm() override = default;
+    ~MPIComm() = default;
+
+    // Owns no MPI resource of its own (the communicator is borrowed), but kept
+    // non-copyable for parity with NCCLComm and the Comm facade.
+    MPIComm(const MPIComm&)            = delete;
+    MPIComm& operator=(const MPIComm&) = delete;
 
     // Static initialization
     static void initialize(int* argc, char*** argv);
     static void finalize();
 
-    // CommBase interface
-    int getRank() const override { return rank_; }
-    int getSize() const override { return size_; }
-    Backend getBackend() const override { return Backend::MPI; }
-    void barrier() override;
+    // Scalar accessors
+    int getRank() const { return rank_; }
+    int getSize() const { return size_; }
+    Backend getBackend() const { return Backend::MPI; }
+    void barrier();
 
     // Point-to-point communication (async)
     // Automatically handles large data (>2GB) by chunking

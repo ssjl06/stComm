@@ -10,7 +10,6 @@
 #include "stComm/types.h"
 #include "stComm/utils.h"
 #include "stComm/request.h"
-#include "stComm/comm_base.h"
 #include "stComm/mpi_comm.h"
 #include "stComm/nccl_comm.h"
 #include "stComm/comm.h"
