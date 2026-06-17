@@ -1,11 +1,13 @@
 /**
  * @file mpi_collective.cpp
- * @brief Collective communication with automatic displacement calculation
+ * @brief Host collective communication via the stComm::Comm facade.
  *
- * This example demonstrates:
- * - allgatherv: Gather variable-sized data from all ranks
- * - alltoallv: All-to-all personalized exchange with variable sizes
+ * Demonstrates:
+ * - allgatherv<Space::Host>: gather variable-sized data from all ranks
+ * - alltoallv<Space::Host>: all-to-all personalized exchange, variable sizes
  * - Automatic displacement calculation (no manual offset computation needed!)
+ *
+ * These are pure facade collectives — the Space::Host tag routes them to MPI.
  */
 
 #include "stComm/stComm.h"
@@ -13,9 +15,9 @@
 #include <vector>
 
 int main(int argc, char** argv) {
-    stComm::MPIComm::initialize(&argc, &argv);
+    stComm::Comm::initialize(&argc, &argv);
 
-    stComm::MPIComm comm;
+    stComm::Comm comm;                 // host-only Comm
     int rank = comm.getRank();
     int size = comm.getSize();
 
@@ -45,9 +47,8 @@ int main(int argc, char** argv) {
         std::vector<int> recvbuf(total_recv);
 
         // Call allgatherv - displacement is automatically calculated!
-        auto req = comm.allgatherv(sendbuf.data(), sendcount,
-                                   recvbuf.data(), recvcounts.data());
-        req->wait();
+        comm.allgatherv<stComm::Space::Host>(sendbuf.data(), sendcount,
+                                               recvbuf.data(), recvcounts.data())->wait();
 
         // Verify results
         auto displs = stComm::Utils::calculateDisplacements(recvcounts);
@@ -101,9 +102,8 @@ int main(int argc, char** argv) {
         }
 
         // Call alltoallv - displacement is automatically calculated!
-        auto req = comm.alltoallv(sendbuf.data(), sendcounts.data(),
-                                  recvbuf.data(), recvcounts.data());
-        req->wait();
+        comm.alltoallv<stComm::Space::Host>(sendbuf.data(), sendcounts.data(),
+                                              recvbuf.data(), recvcounts.data())->wait();
 
         // Verify results
         auto recv_displs = stComm::Utils::calculateDisplacements(recvcounts);
@@ -128,6 +128,6 @@ int main(int argc, char** argv) {
 
     std::cout << "\nRank " << rank << ": All collective operations completed successfully!" << std::endl;
 
-    stComm::MPIComm::finalize();
+    stComm::Comm::finalize();
     return 0;
 }

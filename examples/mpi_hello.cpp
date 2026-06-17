@@ -1,11 +1,12 @@
 /**
  * @file mpi_hello.cpp
- * @brief Basic MPI communication example using stComm
+ * @brief Basic host communication via the unified stComm::Comm facade.
  *
- * This example demonstrates:
- * - MPIComm initialization and finalization
- * - Basic rank and size queries
- * - Simple send/recv communication
+ * Demonstrates:
+ * - Comm lifecycle (initialize/finalize) and a host-only Comm
+ * - rank/size queries and barrier through the facade
+ * - point-to-point send/recv reached through the comm.mpi() escape hatch
+ *   (the facade exposes collectives; p2p lives on the MPI backend)
  */
 
 #include "stComm/stComm.h"
@@ -13,11 +14,9 @@
 #include <vector>
 
 int main(int argc, char** argv) {
-    // Initialize MPI
-    stComm::MPIComm::initialize(&argc, &argv);
+    stComm::Comm::initialize(&argc, &argv);
 
-    // Create MPI communicator
-    stComm::MPIComm comm;
+    stComm::Comm comm;                 // host-only Comm
     int rank = comm.getRank();
     int size = comm.getSize();
 
@@ -27,25 +26,21 @@ int main(int argc, char** argv) {
     comm.barrier();
 
     if (size >= 2) {
-        // Simple send/recv example
         std::vector<int> data(10);
 
         if (rank == 0) {
-            // Rank 0 sends data to rank 1
             for (int i = 0; i < 10; ++i) {
                 data[i] = i * 10;
             }
 
             std::cout << "Rank 0: Sending data to rank 1" << std::endl;
-            auto req = comm.send(data.data(), data.size(), 1, 0);
-            req->wait();
+            // send/recv are backend p2p ops — reach them via the MPI escape hatch.
+            comm.mpi().send(data.data(), data.size(), 1, 0)->wait();
             std::cout << "Rank 0: Data sent successfully" << std::endl;
 
         } else if (rank == 1) {
-            // Rank 1 receives data from rank 0
             std::cout << "Rank 1: Receiving data from rank 0" << std::endl;
-            auto req = comm.recv(data.data(), data.size(), 0, 0);
-            req->wait();
+            comm.mpi().recv(data.data(), data.size(), 0, 0)->wait();
 
             std::cout << "Rank 1: Received data: ";
             for (int val : data) {
@@ -55,7 +50,6 @@ int main(int argc, char** argv) {
         }
     }
 
-    // Finalize MPI
-    stComm::MPIComm::finalize();
+    stComm::Comm::finalize();
     return 0;
 }

@@ -1,11 +1,11 @@
 /**
  * @file mpi_ring.cpp
- * @brief Ring communication pattern using stComm MPI
+ * @brief Ring communication pattern via the stComm::Comm facade.
  *
- * This example demonstrates:
- * - Ring topology communication (each rank sends to next, receives from previous)
- * - Non-blocking send/recv operations
- * - Data passing around a ring
+ * Demonstrates:
+ * - Ring topology (each rank sends to next, receives from previous)
+ * - Non-blocking send/recv reached through the comm.mpi() escape hatch
+ *   (point-to-point is a backend op; the facade exposes collectives)
  */
 
 #include "stComm/stComm.h"
@@ -13,9 +13,9 @@
 #include <vector>
 
 int main(int argc, char** argv) {
-    stComm::MPIComm::initialize(&argc, &argv);
+    stComm::Comm::initialize(&argc, &argv);
 
-    stComm::MPIComm comm;
+    stComm::Comm comm;                 // host-only Comm
     int rank = comm.getRank();
     int size = comm.getSize();
 
@@ -23,7 +23,7 @@ int main(int argc, char** argv) {
         if (rank == 0) {
             std::cerr << "This example requires at least 2 processes" << std::endl;
         }
-        stComm::MPIComm::finalize();
+        stComm::Comm::finalize();
         return 1;
     }
 
@@ -43,9 +43,10 @@ int main(int argc, char** argv) {
     std::cout << "Rank " << rank << ": Sending to " << next
               << ", receiving from " << prev << std::endl;
 
-    // Non-blocking send and receive
-    auto send_req = comm.send(send_data.data(), N, next, 0);
-    auto recv_req = comm.recv(recv_data.data(), N, prev, 0);
+    // Non-blocking p2p send/recv via the MPI escape hatch.
+    auto& mpi = comm.mpi();
+    auto send_req = mpi.send(send_data.data(), N, next, 0);
+    auto recv_req = mpi.recv(recv_data.data(), N, prev, 0);
 
     // Wait for both operations to complete
     send_req->wait();
@@ -68,6 +69,6 @@ int main(int argc, char** argv) {
         std::cerr << "Rank " << rank << ": Data verification failed!" << std::endl;
     }
 
-    stComm::MPIComm::finalize();
+    stComm::Comm::finalize();
     return success ? 0 : 1;
 }

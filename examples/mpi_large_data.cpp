@@ -1,11 +1,11 @@
 /**
  * @file mpi_large_data.cpp
- * @brief Example demonstrating large data transfer (>2GB)
+ * @brief Large (>2GB) transfer via the stComm::Comm facade.
  *
- * This example shows:
- * - Automatic chunking for data larger than 2GB
- * - Transparent handling without API changes
- * - Performance with large datasets
+ * Demonstrates:
+ * - Automatic chunking for data larger than 2GB (transparent, no API change)
+ * - send/recv reached through the comm.mpi() escape hatch; the MPIRequest it
+ *   returns transparently tracks the multiple chunked MPI_Request handles
  */
 
 #include "stComm/stComm.h"
@@ -14,9 +14,9 @@
 #include <cstring>
 
 int main(int argc, char** argv) {
-    stComm::MPIComm::initialize(&argc, &argv);
+    stComm::Comm::initialize(&argc, &argv);
 
-    stComm::MPIComm comm;
+    stComm::Comm comm;                 // host-only Comm
     int rank = comm.getRank();
     int size = comm.getSize();
 
@@ -24,7 +24,7 @@ int main(int argc, char** argv) {
         if (rank == 0) {
             std::cerr << "This example requires at least 2 processes" << std::endl;
         }
-        stComm::MPIComm::finalize();
+        stComm::Comm::finalize();
         return 1;
     }
 
@@ -48,8 +48,8 @@ int main(int argc, char** argv) {
 
         std::cout << "Rank 0: Sending " << (data_size_bytes / GB)
                   << " GB to rank 1 (automatic chunking)..." << std::endl;
-        auto req = comm.send(data.data(), count, 1, 0);
-        req->wait();
+        // p2p send via the MPI escape hatch; chunking happens inside MPIComm.
+        comm.mpi().send(data.data(), count, 1, 0)->wait();
         std::cout << "Rank 0: Send complete!" << std::endl;
 
     } else if (rank == 1) {
@@ -58,8 +58,7 @@ int main(int argc, char** argv) {
 
         std::cout << "Rank 1: Receiving " << (data_size_bytes / GB)
                   << " GB from rank 0..." << std::endl;
-        auto req = comm.recv(data.data(), count, 0, 0);
-        req->wait();
+        comm.mpi().recv(data.data(), count, 0, 0)->wait();
         std::cout << "Rank 1: Receive complete!" << std::endl;
 
         // Verify data (check first, middle, and last elements)
@@ -113,6 +112,6 @@ int main(int argc, char** argv) {
 
     std::cout << "Rank " << rank << ": Example completed" << std::endl;
 
-    stComm::MPIComm::finalize();
+    stComm::Comm::finalize();
     return 0;
 }
