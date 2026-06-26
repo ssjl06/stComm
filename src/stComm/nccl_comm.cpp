@@ -23,13 +23,13 @@ void NCCLComm::initialize(int rank, int nranks, int device_id, ncclUniqueId comm
     device_id_ = device_id;
 
     // Set CUDA device
-    cudaSetDevice(device_id_);
+    STCOMM_CUDA_CHECK(cudaSetDevice(device_id_));
 
     // Create internal CUDA stream for all operations
-    cudaStreamCreate(&stream_);
+    STCOMM_CUDA_CHECK(cudaStreamCreate(&stream_));
 
     // Initialize NCCL communicator
-    ncclCommInitRank(&comm_, nranks, comm_id, rank);
+    STCOMM_NCCL_CHECK(ncclCommInitRank(&comm_, nranks, comm_id, rank));
 
     initialized_ = true;
 }
@@ -43,16 +43,32 @@ ncclUniqueId NCCLComm::getUniqueId() {
 void NCCLComm::barrier() {
     // NCCL doesn't have native barrier, use stream synchronization
     if (stream_ != nullptr) {
-        cudaStreamSynchronize(stream_);
+        STCOMM_CUDA_CHECK(cudaStreamSynchronize(stream_));
     }
 }
 
 void NCCLComm::groupStart() {
-    ncclGroupStart();
+    STCOMM_NCCL_CHECK(ncclGroupStart());
+    in_group_ = true;
 }
 
 void NCCLComm::groupEnd() {
-    ncclGroupEnd();
+    STCOMM_NCCL_CHECK(ncclGroupEnd());
+    in_group_ = false;
+    // The grouped ops are only now on the stream; record every parked request's
+    // event at this single completion point (they all complete together).
+    for (auto& req : pending_records_) {
+        req->record(stream_);
+    }
+    pending_records_.clear();
+}
+
+void NCCLComm::recordOrDefer(const std::shared_ptr<NCCLRequest>& req) {
+    if (in_group_) {
+        pending_records_.push_back(req);
+    } else {
+        req->record(stream_);
+    }
 }
 
 } // namespace stComm

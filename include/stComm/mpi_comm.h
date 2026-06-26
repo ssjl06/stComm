@@ -3,6 +3,7 @@
 #include "types.h"
 #include "request.h"
 #include "utils.h"
+#include "mpi_check.h"
 #include <mpi.h>
 #include <vector>
 #include <type_traits>
@@ -144,7 +145,7 @@ std::shared_ptr<MPIRequest> MPIComm::send(const T* data, size_t count, int dest,
     if (total_bytes <= static_cast<size_t>(INT_MAX)) {
         // Small data: single MPI call
         auto req = std::make_shared<MPIRequest>();
-        MPI_Isend(data, total_bytes, MPI_BYTE, dest, tag, comm_, &req->getHandle());
+        STCOMM_MPI_CHECK(MPI_Isend(data, total_bytes, MPI_BYTE, dest, tag, comm_, &req->getHandle()));
         return req;
     }
 
@@ -155,7 +156,7 @@ std::shared_ptr<MPIRequest> MPIComm::send(const T* data, size_t count, int dest,
 
     while (offset < total_bytes) {
         size_t chunk_size = std::min(MAX_CHUNK_SIZE, total_bytes - offset);
-        MPI_Isend(byte_data + offset, static_cast<int>(chunk_size), MPI_BYTE, dest, tag, comm_, &req->addHandle());
+        STCOMM_MPI_CHECK(MPI_Isend(byte_data + offset, static_cast<int>(chunk_size), MPI_BYTE, dest, tag, comm_, &req->addHandle()));
         offset += chunk_size;
     }
 
@@ -174,7 +175,7 @@ std::shared_ptr<MPIRequest> MPIComm::recv(T* data, size_t count, int source, int
     if (total_bytes <= static_cast<size_t>(INT_MAX)) {
         // Small data: single MPI call
         auto req = std::make_shared<MPIRequest>();
-        MPI_Irecv(data, total_bytes, MPI_BYTE, source, tag, comm_, &req->getHandle());
+        STCOMM_MPI_CHECK(MPI_Irecv(data, total_bytes, MPI_BYTE, source, tag, comm_, &req->getHandle()));
         return req;
     }
 
@@ -185,7 +186,7 @@ std::shared_ptr<MPIRequest> MPIComm::recv(T* data, size_t count, int source, int
 
     while (offset < total_bytes) {
         size_t chunk_size = std::min(MAX_CHUNK_SIZE, total_bytes - offset);
-        MPI_Irecv(byte_data + offset, static_cast<int>(chunk_size), MPI_BYTE, source, tag, comm_, &req->addHandle());
+        STCOMM_MPI_CHECK(MPI_Irecv(byte_data + offset, static_cast<int>(chunk_size), MPI_BYTE, source, tag, comm_, &req->addHandle()));
         offset += chunk_size;
     }
 
@@ -212,9 +213,9 @@ std::shared_ptr<MPIRequest> MPIComm::allgatherv(const T* sendbuf, int sendcount,
         byte_displs[i] = displs[i] * sizeof(T);
     }
 
-    MPI_Iallgatherv(sendbuf, sendcount * sizeof(T), MPI_BYTE,
+    STCOMM_MPI_CHECK(MPI_Iallgatherv(sendbuf, sendcount * sizeof(T), MPI_BYTE,
                     recvbuf, byte_recvcounts.data(), byte_displs.data(), MPI_BYTE,
-                    comm_, &req->getHandle());
+                    comm_, &req->getHandle()));
 
     return req;
 }
@@ -244,9 +245,9 @@ std::shared_ptr<MPIRequest> MPIComm::alltoallv(const T* sendbuf, const int* send
         byte_rdispls[i] = rdispls[i] * sizeof(T);
     }
 
-    MPI_Ialltoallv(sendbuf, byte_sendcounts.data(), byte_sdispls.data(), MPI_BYTE,
+    STCOMM_MPI_CHECK(MPI_Ialltoallv(sendbuf, byte_sendcounts.data(), byte_sdispls.data(), MPI_BYTE,
                    recvbuf, byte_recvcounts.data(), byte_rdispls.data(), MPI_BYTE,
-                   comm_, &req->getHandle());
+                   comm_, &req->getHandle()));
 
     return req;
 }
@@ -261,8 +262,8 @@ std::shared_ptr<MPIRequest> MPIComm::bcast(T* data, size_t count, int root) {
 
     if (total_bytes <= static_cast<size_t>(INT_MAX)) {
         auto req = std::make_shared<MPIRequest>();
-        MPI_Ibcast(data, static_cast<int>(total_bytes), MPI_BYTE, root,
-                   comm_, &req->getHandle());
+        STCOMM_MPI_CHECK(MPI_Ibcast(data, static_cast<int>(total_bytes), MPI_BYTE, root,
+                   comm_, &req->getHandle()));
         return req;
     }
 
@@ -271,8 +272,8 @@ std::shared_ptr<MPIRequest> MPIComm::bcast(T* data, size_t count, int root) {
     size_t offset = 0;
     while (offset < total_bytes) {
         size_t chunk_size = std::min(MAX_CHUNK_SIZE, total_bytes - offset);
-        MPI_Ibcast(byte_data + offset, static_cast<int>(chunk_size), MPI_BYTE,
-                   root, comm_, &req->addHandle());
+        STCOMM_MPI_CHECK(MPI_Ibcast(byte_data + offset, static_cast<int>(chunk_size), MPI_BYTE,
+                   root, comm_, &req->addHandle()));
         offset += chunk_size;
     }
     return req;
@@ -285,16 +286,16 @@ std::pair<T, int> MPIComm::allreduceMaxloc(T value) {
     struct Pair { MPIValue value; int rank; };
     Pair local{static_cast<MPIValue>(value), rank_};
     Pair global{};
-    MPI_Allreduce(&local, &global, 1,
+    STCOMM_MPI_CHECK(MPI_Allreduce(&local, &global, 1,
                   detail::mpi_pair_datatype<MPIValue>(),
-                  MPI_MAXLOC, comm_);
+                  MPI_MAXLOC, comm_));
     return { static_cast<T>(global.value), global.rank };
 }
 
 template<typename T>
 T MPIComm::exscan(T value, MPI_Op op) {
     T result = T{};
-    MPI_Exscan(&value, &result, 1, detail::mpi_datatype<T>(), op, comm_);
+    STCOMM_MPI_CHECK(MPI_Exscan(&value, &result, 1, detail::mpi_datatype<T>(), op, comm_));
     // MPI_Exscan leaves rank 0's recvbuf undefined; return identity (zero) instead.
     return rank_ == 0 ? T{} : result;
 }
@@ -309,9 +310,9 @@ std::shared_ptr<MPIRequest> MPIComm::allreduceMaxloc(T value, std::pair<T, int>*
     buf->local = Pair{static_cast<MPIValue>(value), rank_};
 
     auto req = std::make_shared<MPIRequest>();
-    MPI_Iallreduce(&buf->local, &buf->global, 1,
+    STCOMM_MPI_CHECK(MPI_Iallreduce(&buf->local, &buf->global, 1,
                    detail::mpi_pair_datatype<MPIValue>(), MPI_MAXLOC,
-                   comm_, &req->addHandle());
+                   comm_, &req->addHandle()));
     req->setScratch(buf);
     req->setFinalizer([buf, out]() {
         *out = { static_cast<T>(buf->global.value), buf->global.rank };
@@ -326,8 +327,8 @@ std::shared_ptr<MPIRequest> MPIComm::exscan(T value, T* out, MPI_Op op) {
     buf->send = value;
 
     auto req = std::make_shared<MPIRequest>();
-    MPI_Iexscan(&buf->send, &buf->recv, 1, detail::mpi_datatype<T>(), op,
-                comm_, &req->addHandle());
+    STCOMM_MPI_CHECK(MPI_Iexscan(&buf->send, &buf->recv, 1, detail::mpi_datatype<T>(), op,
+                comm_, &req->addHandle()));
     const int rank = rank_;
     req->setScratch(buf);
     req->setFinalizer([buf, out, rank]() {

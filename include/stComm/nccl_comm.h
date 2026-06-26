@@ -3,6 +3,8 @@
 #include "types.h"
 #include "request.h"
 #include "utils.h"
+#include "cuda_check.h"
+#include "nccl_check.h"
 #include <nccl.h>
 #include <cuda_runtime.h>
 #include <memory>
@@ -74,21 +76,26 @@ public:
     Backend getBackend() const { return Backend::NCCL; }
     void barrier();
 
-    // Point-to-point communication (async, device memory)
-    // Uses internal CUDA stream created during initialization
-    // Note: For multiple send/recv, use groupStart/groupEnd for better performance
+    // Point-to-point communication (async, device memory).
+    // Enqueued on the internal CUDA stream; the returned request records its own
+    // event for per-request completion (see request.h). For a matched send+recv
+    // pair, wrap them in groupStart()/groupEnd() to avoid deadlock — the events
+    // are then recorded at groupEnd(), once the ops are flushed to the stream.
     template<typename T>
     std::shared_ptr<NCCLRequest> send(const T* data, size_t count, int dest);
 
     template<typename T>
     std::shared_ptr<NCCLRequest> recv(T* data, size_t count, int source);
 
-    // Group management for batching multiple operations
+    // Group management for batching multiple operations. Between groupStart()
+    // and groupEnd() the individual ops are fused and not flushed to the stream
+    // until groupEnd(); requests issued in that window defer their event record
+    // to groupEnd(), so wait()/test() on them is only meaningful afterwards.
     void groupStart();
     void groupEnd();
 
-    // Collective communication - with auto displacement (device memory)
-    // Uses internal CUDA stream created during initialization
+    // Collective communication - with auto displacement (device memory).
+    // Enqueued on the internal CUDA stream; the request records its own event.
     template<typename T>
     std::shared_ptr<NCCLRequest> allgatherv(const T* sendbuf, int sendcount,
                          T* recvbuf, const int* recvcounts);
@@ -120,12 +127,22 @@ public:
     ncclComm_t getHandle() const { return comm_; }
 
 private:
+    // Record the request's completion event now, or — if we are inside a user
+    // groupStart()/groupEnd() — defer it to groupEnd(), since the ops are not
+    // actually on the stream until the group is flushed.
+    void recordOrDefer(const std::shared_ptr<NCCLRequest>& req);
+
     ncclComm_t comm_;
     int rank_;
     int size_;
     int device_id_;
     bool initialized_;
     cudaStream_t stream_;  // Internal CUDA stream for all operations
+
+    // User-group bookkeeping (set by groupStart/groupEnd). Requests created
+    // while in_group_ is true park here until groupEnd() records their events.
+    bool in_group_ = false;
+    std::vector<std::shared_ptr<NCCLRequest>> pending_records_;
 };
 
 // ============================================================================
@@ -138,11 +155,12 @@ std::shared_ptr<NCCLRequest> NCCLComm::send(const T* data, size_t count, int des
         return nullptr;
     }
 
-    auto req = std::make_shared<NCCLRequest>(stream_);
+    auto req = std::make_shared<NCCLRequest>();
 
     ncclDataType_t nccl_type = NCCLTypeMap<T>::type();
-    ncclSend(data, count, nccl_type, dest, comm_, stream_);
+    STCOMM_NCCL_CHECK(ncclSend(data, count, nccl_type, dest, comm_, stream_));
 
+    recordOrDefer(req);
     return req;
 }
 
@@ -152,11 +170,12 @@ std::shared_ptr<NCCLRequest> NCCLComm::recv(T* data, size_t count, int source) {
         return nullptr;
     }
 
-    auto req = std::make_shared<NCCLRequest>(stream_);
+    auto req = std::make_shared<NCCLRequest>();
 
     ncclDataType_t nccl_type = NCCLTypeMap<T>::type();
-    ncclRecv(data, count, nccl_type, source, comm_, stream_);
+    STCOMM_NCCL_CHECK(ncclRecv(data, count, nccl_type, source, comm_, stream_));
 
+    recordOrDefer(req);
     return req;
 }
 
@@ -167,7 +186,7 @@ std::shared_ptr<NCCLRequest> NCCLComm::allgatherv(const T* sendbuf, int sendcoun
         return nullptr;
     }
 
-    auto req = std::make_shared<NCCLRequest>(stream_);
+    auto req = std::make_shared<NCCLRequest>();
 
     // Auto-calculate displacements
     auto displs = Utils::calculateDisplacements(recvcounts, size_);
@@ -175,27 +194,29 @@ std::shared_ptr<NCCLRequest> NCCLComm::allgatherv(const T* sendbuf, int sendcoun
     ncclDataType_t nccl_type = NCCLTypeMap<T>::type();
 
     // NCCL doesn't have native allgatherv, use grouped send/recv
-    ncclGroupStart();
+    STCOMM_NCCL_CHECK(ncclGroupStart());
     for (int i = 0; i < size_; ++i) {
         if (i == rank_) {
             // Broadcast my data to all others
             for (int j = 0; j < size_; ++j) {
                 if (j != rank_) {
-                    ncclSend(sendbuf, sendcount, nccl_type, j, comm_, stream_);
+                    STCOMM_NCCL_CHECK(ncclSend(sendbuf, sendcount, nccl_type, j, comm_, stream_));
                 }
             }
             // Copy my own data
             if (recvbuf + displs[rank_] != sendbuf) {
-                cudaMemcpyAsync(recvbuf + displs[rank_], sendbuf, sendcount * sizeof(T),
-                               cudaMemcpyDeviceToDevice, stream_);
+                STCOMM_CUDA_CHECK(cudaMemcpyAsync(recvbuf + displs[rank_], sendbuf,
+                                                  sendcount * sizeof(T),
+                                                  cudaMemcpyDeviceToDevice, stream_));
             }
         } else {
             // Receive from rank i
-            ncclRecv(recvbuf + displs[i], recvcounts[i], nccl_type, i, comm_, stream_);
+            STCOMM_NCCL_CHECK(ncclRecv(recvbuf + displs[i], recvcounts[i], nccl_type, i, comm_, stream_));
         }
     }
-    ncclGroupEnd();
+    STCOMM_NCCL_CHECK(ncclGroupEnd());
 
+    recordOrDefer(req);
     return req;
 }
 
@@ -206,7 +227,7 @@ std::shared_ptr<NCCLRequest> NCCLComm::alltoallv(const T* sendbuf, const int* se
         return nullptr;
     }
 
-    auto req = std::make_shared<NCCLRequest>(stream_);
+    auto req = std::make_shared<NCCLRequest>();
 
     // Auto-calculate displacements
     auto sdispls = Utils::calculateDisplacements(sendcounts, size_);
@@ -215,26 +236,27 @@ std::shared_ptr<NCCLRequest> NCCLComm::alltoallv(const T* sendbuf, const int* se
     ncclDataType_t nccl_type = NCCLTypeMap<T>::type();
 
     // NCCL doesn't have native alltoallv, use grouped send/recv
-    ncclGroupStart();
+    STCOMM_NCCL_CHECK(ncclGroupStart());
     for (int i = 0; i < size_; ++i) {
         if (i != rank_) {
             if (sendcounts[i] > 0) {
-                ncclSend(sendbuf + sdispls[i], sendcounts[i], nccl_type, i, comm_, stream_);
+                STCOMM_NCCL_CHECK(ncclSend(sendbuf + sdispls[i], sendcounts[i], nccl_type, i, comm_, stream_));
             }
             if (recvcounts[i] > 0) {
-                ncclRecv(recvbuf + rdispls[i], recvcounts[i], nccl_type, i, comm_, stream_);
+                STCOMM_NCCL_CHECK(ncclRecv(recvbuf + rdispls[i], recvcounts[i], nccl_type, i, comm_, stream_));
             }
         } else {
             // Self-copy
             if (sendcounts[rank_] > 0 && (recvbuf + rdispls[rank_] != sendbuf + sdispls[rank_])) {
-                cudaMemcpyAsync(recvbuf + rdispls[rank_], sendbuf + sdispls[rank_],
-                               sendcounts[rank_] * sizeof(T),
-                               cudaMemcpyDeviceToDevice, stream_);
+                STCOMM_CUDA_CHECK(cudaMemcpyAsync(recvbuf + rdispls[rank_], sendbuf + sdispls[rank_],
+                                                  sendcounts[rank_] * sizeof(T),
+                                                  cudaMemcpyDeviceToDevice, stream_));
             }
         }
     }
-    ncclGroupEnd();
+    STCOMM_NCCL_CHECK(ncclGroupEnd());
 
+    recordOrDefer(req);
     return req;
 }
 
@@ -244,11 +266,12 @@ std::shared_ptr<NCCLRequest> NCCLComm::bcast(T* data, size_t count, int root) {
         return nullptr;
     }
 
-    auto req = std::make_shared<NCCLRequest>(stream_);
+    auto req = std::make_shared<NCCLRequest>();
 
     ncclDataType_t nccl_type = NCCLTypeMap<T>::type();
-    ncclBroadcast(data, data, count, nccl_type, root, comm_, stream_);
+    STCOMM_NCCL_CHECK(ncclBroadcast(data, data, count, nccl_type, root, comm_, stream_));
 
+    recordOrDefer(req);
     return req;
 }
 
@@ -287,15 +310,15 @@ std::shared_ptr<NCCLRequest> NCCLComm::allreduceMaxloc(T value, std::pair<T, int
     auto s = std::make_shared<detail::GatherScratch<T>>();
     s->hsend = value;
     s->host.resize(size_);
-    cudaMalloc(&s->d_send, sizeof(T));
-    cudaMalloc(&s->d_recv, size_ * sizeof(T));
+    STCOMM_CUDA_CHECK(cudaMalloc(&s->d_send, sizeof(T)));
+    STCOMM_CUDA_CHECK(cudaMalloc(&s->d_recv, size_ * sizeof(T)));
 
-    cudaMemcpyAsync(s->d_send, &s->hsend, sizeof(T), cudaMemcpyHostToDevice, stream_);
-    ncclAllGather(s->d_send, s->d_recv, 1, NCCLTypeMap<T>::type(), comm_, stream_);
-    cudaMemcpyAsync(s->host.data(), s->d_recv, size_ * sizeof(T),
-                    cudaMemcpyDeviceToHost, stream_);
+    STCOMM_CUDA_CHECK(cudaMemcpyAsync(s->d_send, &s->hsend, sizeof(T), cudaMemcpyHostToDevice, stream_));
+    STCOMM_NCCL_CHECK(ncclAllGather(s->d_send, s->d_recv, 1, NCCLTypeMap<T>::type(), comm_, stream_));
+    STCOMM_CUDA_CHECK(cudaMemcpyAsync(s->host.data(), s->d_recv, size_ * sizeof(T),
+                                      cudaMemcpyDeviceToHost, stream_));
 
-    auto req = std::make_shared<NCCLRequest>(stream_);
+    auto req = std::make_shared<NCCLRequest>();
     req->setScratch(s);
     const int n = size_;
     // Runs once after the stream drains: argmax over the gathered values. Ties
@@ -306,6 +329,7 @@ std::shared_ptr<NCCLRequest> NCCLComm::allreduceMaxloc(T value, std::pair<T, int
             if (s->host[i] > s->host[best]) best = i;
         *out = { s->host[best], best };
     });
+    recordOrDefer(req);
     return req;
 }
 
@@ -319,15 +343,15 @@ std::shared_ptr<NCCLRequest> NCCLComm::exscan(T value, T* out, ReduceOp op) {
     auto s = std::make_shared<detail::GatherScratch<T>>();
     s->hsend = value;
     s->host.resize(size_);
-    cudaMalloc(&s->d_send, sizeof(T));
-    cudaMalloc(&s->d_recv, size_ * sizeof(T));
+    STCOMM_CUDA_CHECK(cudaMalloc(&s->d_send, sizeof(T)));
+    STCOMM_CUDA_CHECK(cudaMalloc(&s->d_recv, size_ * sizeof(T)));
 
-    cudaMemcpyAsync(s->d_send, &s->hsend, sizeof(T), cudaMemcpyHostToDevice, stream_);
-    ncclAllGather(s->d_send, s->d_recv, 1, NCCLTypeMap<T>::type(), comm_, stream_);
-    cudaMemcpyAsync(s->host.data(), s->d_recv, size_ * sizeof(T),
-                    cudaMemcpyDeviceToHost, stream_);
+    STCOMM_CUDA_CHECK(cudaMemcpyAsync(s->d_send, &s->hsend, sizeof(T), cudaMemcpyHostToDevice, stream_));
+    STCOMM_NCCL_CHECK(ncclAllGather(s->d_send, s->d_recv, 1, NCCLTypeMap<T>::type(), comm_, stream_));
+    STCOMM_CUDA_CHECK(cudaMemcpyAsync(s->host.data(), s->d_recv, size_ * sizeof(T),
+                                      cudaMemcpyDeviceToHost, stream_));
 
-    auto req = std::make_shared<NCCLRequest>(stream_);
+    auto req = std::make_shared<NCCLRequest>();
     req->setScratch(s);
     const int rank = rank_;
     // Runs once after the stream drains: exclusive scan over ranks [0, rank).
@@ -340,6 +364,7 @@ std::shared_ptr<NCCLRequest> NCCLComm::exscan(T value, T* out, ReduceOp op) {
             acc = detail::apply_reduce(op, acc, s->host[i]);
         *out = acc;
     });
+    recordOrDefer(req);
     return req;
 }
 
