@@ -1,6 +1,8 @@
 #pragma once
 
 #include "types.h"
+#include "cuda_check.h"
+#include "mpi_check.h"
 #include <mpi.h>
 #include <cuda_runtime.h>
 #include <functional>
@@ -68,16 +70,17 @@ public:
 
     void wait() override {
         if (!handles_.empty())
-            MPI_Waitall(static_cast<int>(handles_.size()), handles_.data(),
-                        MPI_STATUSES_IGNORE);
+            STCOMM_MPI_CHECK(MPI_Waitall(static_cast<int>(handles_.size()),
+                                         handles_.data(), MPI_STATUSES_IGNORE));
         complete();
     }
 
     bool test() override {
         if (!handles_.empty()) {
             int flag;
-            MPI_Testall(static_cast<int>(handles_.size()), handles_.data(),
-                        &flag, MPI_STATUSES_IGNORE);
+            STCOMM_MPI_CHECK(MPI_Testall(static_cast<int>(handles_.size()),
+                                         handles_.data(), &flag,
+                                         MPI_STATUSES_IGNORE));
             if (!flag) return false;
         }
         complete();
@@ -106,17 +109,46 @@ private:
 };
 
 /**
- * @brief NCCL request handle (CUDA stream-based).
+ * @brief NCCL request handle (CUDA event-based).
  *
- * A single CUDA stream serializes and aggregates every enqueued NCCL/CUDA op,
- * so one cudaStreamSynchronize waits for the whole sequence — no "multi" form
- * is needed. scratch/finalizer mirror MPIRequest for stream-based emulated
- * reductions (gather on the stream, reduce on the host once it drains).
+ * NCCLComm enqueues every op on its single internal stream (NCCL requires a
+ * consistent issue order per communicator, so one stream keeps that ordering
+ * trivially correct). To make completion *per request* rather than per stream,
+ * each request records its own cudaEvent right after its ops are enqueued;
+ * wait()/test() then track that event, so r1.wait() does not block on a later
+ * r2's work that happens to share the stream. scratch/finalizer mirror
+ * MPIRequest for the emulated reductions (gather on the stream, reduce on the
+ * host once the event signals).
+ *
+ * Lifecycle: NCCLComm constructs the request, enqueues the ops, then calls
+ * record(stream). Until record() runs the request is "not yet recorded" and
+ * wait()/test() complete immediately — this is what lets a request issued
+ * inside a user groupStart()/groupEnd() defer its event to groupEnd(), where
+ * the ops are actually flushed to the stream.
  */
 class NCCLRequest : public Request {
 public:
-    explicit NCCLRequest(cudaStream_t stream)
-        : stream_(stream), status_(Status::PENDING) {}
+    NCCLRequest() : status_(Status::PENDING) {
+        // Timing is never needed; disabling it makes the event cheaper.
+        STCOMM_CUDA_CHECK(cudaEventCreateWithFlags(&event_, cudaEventDisableTiming));
+    }
+
+    ~NCCLRequest() override {
+        // Destructors must not throw, so swallow any error here.
+        if (event_ != nullptr) cudaEventDestroy(event_);
+    }
+
+    NCCLRequest(const NCCLRequest&)            = delete;
+    NCCLRequest& operator=(const NCCLRequest&) = delete;
+
+    /// @brief Mark this request's completion point on `stream`. Called by
+    /// NCCLComm once the request's ops have been enqueued (after groupEnd() for
+    /// grouped ops). wait()/test() are no-ops until this runs.
+    void record(cudaStream_t stream) {
+        stream_ = stream;
+        STCOMM_CUDA_CHECK(cudaEventRecord(event_, stream));
+        recorded_ = true;
+    }
 
     /// @brief Keep internal buffers alive until the operation completes.
     void setScratch(std::shared_ptr<void> scratch) { scratch_ = std::move(scratch); }
@@ -125,12 +157,16 @@ public:
     void setFinalizer(std::function<void()> fn) { finalizer_ = std::move(fn); }
 
     void wait() override {
-        if (stream_ != nullptr) cudaStreamSynchronize(stream_);
+        if (recorded_) STCOMM_CUDA_CHECK(cudaEventSynchronize(event_));
         complete();
     }
 
     bool test() override {
-        if (stream_ != nullptr && cudaStreamQuery(stream_) != cudaSuccess) return false;
+        if (recorded_) {
+            cudaError_t err = cudaEventQuery(event_);
+            if (err == cudaErrorNotReady) return false;
+            STCOMM_CUDA_CHECK(err);
+        }
         complete();
         return true;
     }
@@ -138,6 +174,8 @@ public:
     Status getStatus() const override { return status_; }
     Backend getBackend() const override { return Backend::NCCL; }
 
+    /// @brief Stream this request was recorded on (null until record()). For
+    /// advanced callers chaining their own CUDA work behind the operation.
     cudaStream_t getStream() const { return stream_; }
 
 private:
@@ -147,7 +185,9 @@ private:
         if (finalizer_) finalizer_();
     }
 
-    cudaStream_t          stream_;
+    cudaStream_t          stream_ = nullptr;
+    cudaEvent_t           event_  = nullptr;
+    bool                  recorded_ = false;
     std::shared_ptr<void> scratch_;
     std::function<void()> finalizer_;
     Status                status_;
