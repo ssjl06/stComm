@@ -1,0 +1,43 @@
+# stComm CI.
+#
+# GitHub-hosted runners have no GPU, but that still buys real coverage here:
+# the full library (MPI + NCCL backends) compile-checks under nvcc, and the
+# Host-space test suite RUNS under `mpirun -n 2` — every Device-space test
+# GTEST_SKIPs itself when it can't get one GPU per rank, by design.
+
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  build-and-host-test:
+    name: build + host-space tests (CUDA 12.4 toolchain, no GPU)
+    runs-on: ubuntu-22.04
+    container: nvidia/cuda:12.4.1-devel-ubuntu22.04
+    steps:
+      - name: Install prerequisites
+        run: |
+          apt-get update -qq
+          DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+            git ca-certificates cmake make \
+            openmpi-bin libopenmpi-dev \
+            libgtest-dev libgmock-dev
+          # The CUDA image ships NCCL as version-held packages — installing them
+          # unconditionally makes apt fail on the hold. Only install when absent.
+          [ -f /usr/include/nccl.h ] || DEBIAN_FRONTEND=noninteractive \
+            apt-get install -y --no-install-recommends --allow-change-held-packages \
+            libnccl2 libnccl-dev
+      - uses: actions/checkout@v4
+      - name: Build
+        run: |
+          git config --global --add safe.directory '*'
+          CUDA_ARCH=86 ./build.sh
+      - name: Host-space tests (Device tests self-SKIP without GPUs)
+        env:
+          OMPI_ALLOW_RUN_AS_ROOT: "1"
+          OMPI_ALLOW_RUN_AS_ROOT_CONFIRM: "1"
+        run: |
+          mpirun -n 2 --oversubscribe ./build/tests/stComm_tests
