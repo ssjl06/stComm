@@ -14,6 +14,7 @@
 #include <gtest/gtest.h>
 #include "stComm/stComm.h"
 #include <cuda_runtime.h>
+#include <cstdint>
 #include <vector>
 #include <type_traits>
 
@@ -137,6 +138,24 @@ TEST_F(CommFacadeTest, ExscanReduceOpHost) {
     EXPECT_EQ(gotMax, expMax);
 }
 
+TEST_F(CommFacadeTest, AllreduceHost) {
+    Comm comm;
+    const int n = 4;
+    // Element i of this rank contributes rank + i; the sum over ranks is
+    // size*(size-1)/2 + size*i, and the max is (size-1) + i.
+    std::vector<long> send(n), sum(n, -1), mx(n, -1);
+    for (int i = 0; i < n; ++i) send[i] = rank + i;
+
+    comm.allreduce<Space::Host>(send.data(), sum.data(), n, ReduceOp::Sum)->wait();
+    comm.allreduce<Space::Host>(send.data(), mx.data(),  n, ReduceOp::Max)->wait();
+
+    for (int i = 0; i < n; ++i) {
+        EXPECT_EQ(sum[i], static_cast<long>(size) * (size - 1) / 2
+                          + static_cast<long>(size) * i) << "sum elem " << i;
+        EXPECT_EQ(mx[i], static_cast<long>(size - 1) + i)  << "max elem " << i;
+    }
+}
+
 // ============================================================================
 // Device-space facade — SKIPs unless each rank owns a GPU
 // ============================================================================
@@ -193,4 +212,34 @@ TEST_F(CommFacadeTest, ReductionsDevice) {
     int gotSum = -1;
     comm.exscan<Space::Device>(rank + 1, &gotSum, ReduceOp::Sum)->wait();
     EXPECT_EQ(gotSum, expSum);
+}
+
+TEST_F(CommFacadeTest, AllreduceDevice) {
+    if (!deviceUsable())
+        GTEST_SKIP() << "needs " << size << " GPUs, have " << num_gpus;
+
+    Comm comm = Comm::onDevice(rank);
+    cudaSetDevice(rank);
+
+    // Native ncclAllReduce on int64 device buffers — exact integer sums.
+    const int n = 4;
+    std::vector<std::int64_t> host(n);
+    for (int i = 0; i < n; ++i) host[i] = rank + i;
+
+    std::int64_t *dsend = nullptr, *drecv = nullptr;
+    cudaMalloc(&dsend, n * sizeof(std::int64_t));
+    cudaMalloc(&drecv, n * sizeof(std::int64_t));
+    cudaMemcpy(dsend, host.data(), n * sizeof(std::int64_t), cudaMemcpyHostToDevice);
+
+    comm.allreduce<Space::Device>(dsend, drecv, n, ReduceOp::Sum)->wait();
+
+    std::vector<std::int64_t> got(n, -1);
+    cudaMemcpy(got.data(), drecv, n * sizeof(std::int64_t), cudaMemcpyDeviceToHost);
+    for (int i = 0; i < n; ++i) {
+        EXPECT_EQ(got[i], static_cast<std::int64_t>(size) * (size - 1) / 2
+                          + static_cast<std::int64_t>(size) * i) << "sum elem " << i;
+    }
+
+    cudaFree(dsend);
+    cudaFree(drecv);
 }

@@ -120,6 +120,16 @@ public:
     template<typename T>
     std::shared_ptr<MPIRequest> exscan(T value, T* out, MPI_Op op = MPI_SUM);
 
+    // Element-wise allreduce over `count` values of T (async): recvbuf receives
+    // the reduction (op) of every rank's sendbuf. Unlike the byte-based data
+    // movers above, a reduction needs the real datatype so MPI applies `op`
+    // element-wise. Caller-owned buffers must outlive the returned request.
+    // Chunked so each MPI call stays under INT_MAX elements (reductions are
+    // element-wise, so chunking is safe).
+    template<typename T>
+    std::shared_ptr<MPIRequest> allreduce(const T* sendbuf, T* recvbuf,
+                                          size_t count, MPI_Op op = MPI_SUM);
+
     // Get native handle
     MPI_Comm getHandle() const { return comm_; }
 
@@ -317,6 +327,27 @@ std::shared_ptr<MPIRequest> MPIComm::allreduceMaxloc(T value, std::pair<T, int>*
     req->setFinalizer([buf, out]() {
         *out = { static_cast<T>(buf->global.value), buf->global.rank };
     });
+    return req;
+}
+
+template<typename T>
+std::shared_ptr<MPIRequest> MPIComm::allreduce(const T* sendbuf, T* recvbuf,
+                                               size_t count, MPI_Op op) {
+    static_assert(std::is_trivially_copyable<T>::value,
+                  "Type must be trivially copyable for MPI communication");
+
+    const size_t MAX_CHUNK_ELEMS = static_cast<size_t>(INT_MAX);
+    auto req = std::make_shared<MPIRequest>();
+    size_t offset = 0;
+    // do-while so count == 0 still issues one (legal) zero-count collective,
+    // keeping every rank's collective sequence matched.
+    do {
+        const size_t chunk = std::min(MAX_CHUNK_ELEMS, count - offset);
+        STCOMM_MPI_CHECK(MPI_Iallreduce(sendbuf + offset, recvbuf + offset,
+                       static_cast<int>(chunk), detail::mpi_datatype<T>(), op,
+                       comm_, &req->addHandle()));
+        offset += chunk;
+    } while (offset < count);
     return req;
 }
 
