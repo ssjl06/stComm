@@ -146,6 +146,12 @@ public:
     // Get native handle
     ncclComm_t getHandle() const { return comm_; }
 
+    // The internal CUDA stream every NCCL operation is enqueued on. Advanced
+    // callers launch their own kernels on this stream to interleave compute
+    // with collectives in strict stream order — no event juggling, no
+    // per-operation synchronization (the device-resident solver loop pattern).
+    cudaStream_t getStream() const { return stream_; }
+
 private:
     // Record the request's completion event now, or — if we are inside a user
     // groupStart()/groupEnd() — defer it to groupEnd(), since the ops are not
