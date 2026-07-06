@@ -28,6 +28,18 @@ inline T apply_reduce(ReduceOp op, T a, T b) {
     return a;  // unreachable
 }
 
+// Map the backend-agnostic ReduceOp to the native NCCL reduction op. Kept
+// internal so callers of NCCLComm never name ncclRedOp_t themselves.
+inline ncclRedOp_t to_nccl_op(ReduceOp op) {
+    switch (op) {
+        case ReduceOp::Sum:  return ncclSum;
+        case ReduceOp::Prod: return ncclProd;
+        case ReduceOp::Max:  return ncclMax;
+        case ReduceOp::Min:  return ncclMin;
+    }
+    return ncclSum;  // unreachable; silences -Wreturn-type
+}
+
 }  // namespace detail
 
 /**
@@ -122,6 +134,14 @@ public:
 
     template<typename T>
     std::shared_ptr<NCCLRequest> exscan(T value, T* out, ReduceOp op = ReduceOp::Sum);
+
+    // Element-wise allreduce over `count` values of T (async, device memory):
+    // recvbuf receives the reduction (op) of every rank's sendbuf. Native
+    // ncclAllReduce — no host staging. In-place is allowed (sendbuf == recvbuf).
+    // Issued on the internal CUDA stream; call .wait() to synchronize.
+    template<typename T>
+    std::shared_ptr<NCCLRequest> allreduce(const T* sendbuf, T* recvbuf,
+                                           size_t count, ReduceOp op = ReduceOp::Sum);
 
     // Get native handle
     ncclComm_t getHandle() const { return comm_; }
@@ -270,6 +290,22 @@ std::shared_ptr<NCCLRequest> NCCLComm::bcast(T* data, size_t count, int root) {
 
     ncclDataType_t nccl_type = NCCLTypeMap<T>::type();
     STCOMM_NCCL_CHECK(ncclBroadcast(data, data, count, nccl_type, root, comm_, stream_));
+
+    recordOrDefer(req);
+    return req;
+}
+
+template<typename T>
+std::shared_ptr<NCCLRequest> NCCLComm::allreduce(const T* sendbuf, T* recvbuf,
+                                                 size_t count, ReduceOp op) {
+    if (!initialized_) {
+        return nullptr;
+    }
+
+    auto req = std::make_shared<NCCLRequest>();
+
+    STCOMM_NCCL_CHECK(ncclAllReduce(sendbuf, recvbuf, count, NCCLTypeMap<T>::type(),
+                                    detail::to_nccl_op(op), comm_, stream_));
 
     recordOrDefer(req);
     return req;

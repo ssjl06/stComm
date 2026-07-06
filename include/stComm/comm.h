@@ -145,6 +145,17 @@ public:
         else                                 return mpi_->exscan(value, out, detail::to_mpi_op(op));
     }
 
+    // Element-wise allreduce over `count` values of T: recvbuf receives the
+    // reduction (op) of every rank's sendbuf. Host maps ReduceOp to the MPI op
+    // (MPI_Iallreduce); Device is native ncclAllReduce — no host staging,
+    // in-place allowed (sendbuf == recvbuf).
+    template<Space Sp, typename T>
+    RequestPtrFor<Sp> allreduce(const T* sendbuf, T* recvbuf, std::size_t count,
+                                ReduceOp op = ReduceOp::Sum) {
+        if constexpr (Sp == Space::Device) { assert(nccl_); return nccl_->allreduce(sendbuf, recvbuf, count, op); }
+        else                                 return mpi_->allreduce(sendbuf, recvbuf, count, detail::to_mpi_op(op));
+    }
+
     // ---- Backend escape hatches for backend-specific APIs ---------------
     // Advanced callers reach MPI/NCCL specifics (native handles, streams,
     // groups) through the backend object itself; Comm stays backend-agnostic.
