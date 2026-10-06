@@ -8,7 +8,10 @@
 #include <vector>
 #include <random>
 #include <algorithm>
+#include <climits>
+#include <cstdint>
 #include <cstring>
+#include <stdexcept>
 
 class MPICommTest : public ::testing::Test {
 protected:
@@ -417,6 +420,27 @@ TEST_F(MPICommTest, AlltoallvVariableCounts) {
 // ============================================================================
 // Async Operation Tests
 // ============================================================================
+
+// The v-collectives move MPI_BYTE with int counts: an element count whose
+// byte size passes INT_MAX used to wrap silently into a wrong-size transfer.
+// Every rank passes the same oversized counts, so all throw before any MPI
+// call (no buffers are touched — nullptr is fine).
+TEST_F(MPICommTest, VCollectivesRejectByteCountOverflow) {
+    std::vector<int> counts(size, INT_MAX / 4);  // × 8 B per int64 > INT_MAX
+    EXPECT_THROW(comm->alltoallv<std::int64_t>(nullptr, counts.data(),
+                                               nullptr, counts.data()),
+                 std::overflow_error);
+    EXPECT_THROW(comm->allgatherv<std::int64_t>(nullptr, counts[0],
+                                                nullptr, counts.data()),
+                 std::overflow_error);
+}
+
+TEST(UtilsTest, DisplacementOverflowThrows) {
+    const int counts[3] = {INT_MAX, 1, 1};  // displs[2] = INT_MAX + 1
+    EXPECT_THROW(stComm::Utils::calculateDisplacements(counts, 3), std::overflow_error);
+    const int ok[3] = {10, 20, 30};
+    EXPECT_EQ(stComm::Utils::calculateDisplacements(ok, 3), (std::vector<int>{0, 10, 30}));
+}
 
 TEST_F(MPICommTest, AsyncSendRecv) {
     if (size < 2) {
