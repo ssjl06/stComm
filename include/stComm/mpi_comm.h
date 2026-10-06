@@ -5,6 +5,11 @@
 #include "utils.h"
 #include "mpi_check.h"
 #include <mpi.h>
+#include <climits>
+#include <cstdint>
+#include <memory>
+#include <stdexcept>
+#include <string>
 #include <vector>
 #include <type_traits>
 #include <utility>
@@ -44,6 +49,42 @@ template<typename T> struct maxloc_value_cast      { using type = T;    };
 template<>           struct maxloc_value_cast<long long>          { using type = long; };
 template<>           struct maxloc_value_cast<unsigned long>      { using type = long; };
 template<>           struct maxloc_value_cast<unsigned long long> { using type = long; };
+
+// The v-collectives move MPI_BYTE with int counts and int displacements, so
+// an element count × sizeof(T) past INT_MAX would wrap into a wrong-size or
+// negative transfer with no error. Compute in int64 and refuse instead.
+inline int checkedBytes(std::int64_t elems, std::size_t elem_size, const char* op) {
+    const std::int64_t bytes = elems * static_cast<std::int64_t>(elem_size);
+    if (elems < 0 || bytes > INT_MAX) {
+        throw std::overflow_error(std::string("stComm MPI ") + op + ": " +
+                                  std::to_string(elems) + " elements × " +
+                                  std::to_string(elem_size) + " B is outside the int "
+                                  "byte-count range (max INT_MAX bytes per count/offset)");
+    }
+    return static_cast<int>(bytes);
+}
+
+// Per-rank byte counts + displacements for one side of a v-collective. MPI may
+// read these arrays until the non-blocking call completes, so they live in the
+// request's scratch (MPIRequest::setScratch), not on this function's stack.
+struct ByteLayout {
+    std::vector<int> counts;
+    std::vector<int> displs;
+};
+
+inline ByteLayout byteLayout(const int* counts, int nranks, std::size_t elem_size,
+                             const char* op) {
+    ByteLayout l;
+    l.counts.resize(nranks);
+    l.displs.resize(nranks);
+    std::int64_t offset = 0;  // in elements
+    for (int i = 0; i < nranks; ++i) {
+        l.displs[i] = checkedBytes(offset, elem_size, op);
+        l.counts[i] = checkedBytes(counts[i], elem_size, op);
+        offset += counts[i];
+    }
+    return l;
+}
 
 } // namespace detail
 
@@ -211,21 +252,15 @@ std::shared_ptr<MPIRequest> MPIComm::allgatherv(const T* sendbuf, int sendcount,
 
     auto req = std::make_shared<MPIRequest>();
 
-    // Auto-calculate displacements
-    auto displs = Utils::calculateDisplacements(recvcounts, size_);
+    // Byte counts/displacements (auto displacement), range-checked.
+    const int send_bytes = detail::checkedBytes(sendcount, sizeof(T), "allgatherv");
+    auto recv = std::make_shared<detail::ByteLayout>(
+        detail::byteLayout(recvcounts, size_, sizeof(T), "allgatherv"));
 
-    // Convert counts and displacements to bytes
-    std::vector<int> byte_recvcounts(size_);
-    std::vector<int> byte_displs(size_);
-
-    for (int i = 0; i < size_; ++i) {
-        byte_recvcounts[i] = recvcounts[i] * sizeof(T);
-        byte_displs[i] = displs[i] * sizeof(T);
-    }
-
-    STCOMM_MPI_CHECK(MPI_Iallgatherv(sendbuf, sendcount * sizeof(T), MPI_BYTE,
-                    recvbuf, byte_recvcounts.data(), byte_displs.data(), MPI_BYTE,
+    STCOMM_MPI_CHECK(MPI_Iallgatherv(sendbuf, send_bytes, MPI_BYTE,
+                    recvbuf, recv->counts.data(), recv->displs.data(), MPI_BYTE,
                     comm_, &req->getHandle()));
+    req->setScratch(recv);  // arrays must outlive the non-blocking call
 
     return req;
 }
@@ -238,26 +273,19 @@ std::shared_ptr<MPIRequest> MPIComm::alltoallv(const T* sendbuf, const int* send
 
     auto req = std::make_shared<MPIRequest>();
 
-    // Auto-calculate displacements for both send and recv
-    auto sdispls = Utils::calculateDisplacements(sendcounts, size_);
-    auto rdispls = Utils::calculateDisplacements(recvcounts, size_);
+    // Byte counts/displacements for both sides (auto displacement),
+    // range-checked.
+    using Layouts = std::pair<detail::ByteLayout, detail::ByteLayout>;
+    auto layouts = std::make_shared<Layouts>(
+        detail::byteLayout(sendcounts, size_, sizeof(T), "alltoallv"),
+        detail::byteLayout(recvcounts, size_, sizeof(T), "alltoallv"));
+    const detail::ByteLayout& snd = layouts->first;
+    const detail::ByteLayout& rcv = layouts->second;
 
-    // Convert counts and displacements to bytes
-    std::vector<int> byte_sendcounts(size_);
-    std::vector<int> byte_sdispls(size_);
-    std::vector<int> byte_recvcounts(size_);
-    std::vector<int> byte_rdispls(size_);
-
-    for (int i = 0; i < size_; ++i) {
-        byte_sendcounts[i] = sendcounts[i] * sizeof(T);
-        byte_sdispls[i] = sdispls[i] * sizeof(T);
-        byte_recvcounts[i] = recvcounts[i] * sizeof(T);
-        byte_rdispls[i] = rdispls[i] * sizeof(T);
-    }
-
-    STCOMM_MPI_CHECK(MPI_Ialltoallv(sendbuf, byte_sendcounts.data(), byte_sdispls.data(), MPI_BYTE,
-                   recvbuf, byte_recvcounts.data(), byte_rdispls.data(), MPI_BYTE,
+    STCOMM_MPI_CHECK(MPI_Ialltoallv(sendbuf, snd.counts.data(), snd.displs.data(), MPI_BYTE,
+                   recvbuf, rcv.counts.data(), rcv.displs.data(), MPI_BYTE,
                    comm_, &req->getHandle()));
+    req->setScratch(layouts);  // arrays must outlive the non-blocking call
 
     return req;
 }

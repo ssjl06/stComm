@@ -3,10 +3,18 @@
 #include "types.h"
 #include "cuda_check.h"
 #include "mpi_check.h"
+#include "nccl_check.h"
 #include <mpi.h>
+#include <nccl.h>
 #include <cuda_runtime.h>
+#include <atomic>
+#include <chrono>
+#include <cstdint>
+#include <cstdlib>
 #include <functional>
 #include <memory>
+#include <stdexcept>
+#include <string>
 #include <vector>
 
 namespace stComm {
@@ -108,6 +116,76 @@ private:
     Status                   status_;
 };
 
+namespace detail {
+
+// Shared by an NCCLComm and every request it issues, so whichever wait first
+// sees the communicator fail aborts it exactly once, and ~NCCLComm then skips
+// ncclCommDestroy on the dead handle. `comm` is nulled when the NCCLComm is
+// destroyed so a request that outlives it stops polling the handle.
+struct NCCLCommState {
+    ncclComm_t        comm = nullptr;
+    std::atomic<bool> aborted{false};
+};
+
+// STCOMM_NCCL_TIMEOUT_SEC: optional wall-clock limit for one NCCL wait, read
+// once. Unset or <= 0 means no limit (the default — a legitimately long
+// collective must never be cut off unless the user asks for it).
+inline double ncclWaitTimeoutSec() {
+    static const double sec = [] {
+        const char* s = std::getenv("STCOMM_NCCL_TIMEOUT_SEC");
+        return s ? std::atof(s) : 0.0;
+    }();
+    return sec;
+}
+
+[[noreturn]] inline void abortAndThrow(NCCLCommState& state, const std::string& msg) {
+    if (!state.aborted.exchange(true)) ncclCommAbort(state.comm);
+    throw std::runtime_error("stComm NCCL: " + msg);
+}
+
+// Wait until `query()` (cudaEventQuery / cudaStreamQuery) stops reporting
+// cudaErrorNotReady. Busy-polls like cudaEventSynchronize's default spin, but
+// every kAsyncCheckInterval polls also asks NCCL whether the communicator has
+// failed (network fault, dead peer): the event would then never fire and a
+// plain synchronize would hang until the job's walltime. Short ops complete
+// before the first check and pay nothing extra. On an async error or timeout,
+// abort the communicator and throw.
+template<typename Query>
+void ncclPollWait(Query query, NCCLCommState* state, const char* what) {
+    constexpr std::uint64_t kAsyncCheckInterval = 1024;
+    std::chrono::steady_clock::time_point start{};
+    for (std::uint64_t n = 1;; ++n) {
+        const cudaError_t err = query();
+        if (err == cudaSuccess) return;
+        if (err != cudaErrorNotReady) STCOMM_CUDA_CHECK(err);
+        if (n % kAsyncCheckInterval != 0 || state == nullptr || state->comm == nullptr) {
+            continue;
+        }
+
+        ncclResult_t async_err = ncclSuccess;
+        STCOMM_NCCL_CHECK(ncclCommGetAsyncError(state->comm, &async_err));
+        if (async_err != ncclSuccess && async_err != ncclInProgress) {
+            abortAndThrow(*state, std::string(what) + ": communicator failed: " +
+                                  ncclGetErrorString(async_err));
+        }
+
+        const double limit = ncclWaitTimeoutSec();
+        if (limit > 0) {
+            // The clock starts at the first check, a few µs in — negligible
+            // against any limit worth setting.
+            const auto now = std::chrono::steady_clock::now();
+            if (n == kAsyncCheckInterval) {
+                start = now;
+            } else if (std::chrono::duration<double>(now - start).count() > limit) {
+                abortAndThrow(*state, std::string(what) + ": no completion within " +
+                                      std::to_string(limit) + " s (STCOMM_NCCL_TIMEOUT_SEC)");
+            }
+        }
+    }
+}
+
+}  // namespace detail
+
 /**
  * @brief NCCL request handle (CUDA event-based).
  *
@@ -121,7 +199,7 @@ private:
  * host once the event signals).
  *
  * Lifecycle: NCCLComm constructs the request, enqueues the ops, then calls
- * record(stream). Until record() runs the request is "not yet recorded" and
+ * record(stream, state). Until record() runs the request is "not yet recorded" and
  * wait()/test() complete immediately — this is what lets a request issued
  * inside a user groupStart()/groupEnd() defer its event to groupEnd(), where
  * the ops are actually flushed to the stream.
@@ -143,9 +221,11 @@ public:
 
     /// @brief Mark this request's completion point on `stream`. Called by
     /// NCCLComm once the request's ops have been enqueued (after groupEnd() for
-    /// grouped ops). wait()/test() are no-ops until this runs.
-    void record(cudaStream_t stream) {
+    /// grouped ops). wait()/test() are no-ops until this runs. `state` lets
+    /// wait()/test() detect (and abort on) an asynchronous communicator failure.
+    void record(cudaStream_t stream, std::shared_ptr<detail::NCCLCommState> state) {
         stream_ = stream;
+        state_  = std::move(state);
         STCOMM_CUDA_CHECK(cudaEventRecord(event_, stream));
         recorded_ = true;
     }
@@ -157,14 +237,29 @@ public:
     void setFinalizer(std::function<void()> fn) { finalizer_ = std::move(fn); }
 
     void wait() override {
-        if (recorded_) STCOMM_CUDA_CHECK(cudaEventSynchronize(event_));
+        if (recorded_) {
+            detail::ncclPollWait([this] { return cudaEventQuery(event_); },
+                                 state_.get(), "wait");
+        }
         complete();
     }
 
     bool test() override {
         if (recorded_) {
             cudaError_t err = cudaEventQuery(event_);
-            if (err == cudaErrorNotReady) return false;
+            if (err == cudaErrorNotReady) {
+                // A caller looping on test() must see a failed communicator
+                // too, or it would spin forever on an event that never fires.
+                if (state_ && state_->comm) {
+                    ncclResult_t async_err = ncclSuccess;
+                    STCOMM_NCCL_CHECK(ncclCommGetAsyncError(state_->comm, &async_err));
+                    if (async_err != ncclSuccess && async_err != ncclInProgress) {
+                        detail::abortAndThrow(*state_, std::string("test: communicator failed: ") +
+                                                       ncclGetErrorString(async_err));
+                    }
+                }
+                return false;
+            }
             STCOMM_CUDA_CHECK(err);
         }
         complete();
@@ -187,6 +282,7 @@ private:
 
     cudaStream_t          stream_ = nullptr;
     cudaEvent_t           event_  = nullptr;
+    std::shared_ptr<detail::NCCLCommState> state_;
     bool                  recorded_ = false;
     std::shared_ptr<void> scratch_;
     std::function<void()> finalizer_;

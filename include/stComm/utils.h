@@ -1,7 +1,11 @@
 #pragma once
 
-#include <vector>
+#include <climits>
+#include <cstdint>
 #include <numeric>
+#include <stdexcept>
+#include <string>
+#include <vector>
 
 namespace stComm {
 
@@ -21,10 +25,18 @@ public:
      * @return Vector of displacements
      */
     static std::vector<int> calculateDisplacements(const int* counts, int num_ranks) {
+        // Accumulate in int64: an int running sum past INT_MAX is UB and
+        // would hand MPI/NCCL a wrapped (negative) offset.
         std::vector<int> displs(num_ranks);
-        displs[0] = 0;
-        for (int i = 1; i < num_ranks; ++i) {
-            displs[i] = displs[i - 1] + counts[i - 1];
+        std::int64_t offset = 0;
+        for (int i = 0; i < num_ranks; ++i) {
+            if (offset > INT_MAX) {
+                throw std::overflow_error(
+                    "stComm: displacement " + std::to_string(offset) +
+                    " exceeds INT_MAX (counts sum past the int range)");
+            }
+            displs[i] = static_cast<int>(offset);
+            offset += counts[i];
         }
         return displs;
     }

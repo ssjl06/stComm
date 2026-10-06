@@ -159,6 +159,10 @@ private:
     void recordOrDefer(const std::shared_ptr<NCCLRequest>& req);
 
     ncclComm_t comm_;
+    // Shared with every issued request (see detail::NCCLCommState): lets a
+    // wait that detects an async failure abort the communicator, and tells
+    // the destructor not to destroy an aborted one.
+    std::shared_ptr<detail::NCCLCommState> state_;
     int rank_;
     int size_;
     int device_id_;
