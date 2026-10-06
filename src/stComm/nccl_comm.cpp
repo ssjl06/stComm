@@ -56,6 +56,7 @@ void NCCLComm::barrier() {
 }
 
 void NCCLComm::groupStart() {
+    detail::throwIfAborted(state_.get(), "groupStart");
     STCOMM_NCCL_CHECK(ncclGroupStart());
     in_group_ = true;
 }

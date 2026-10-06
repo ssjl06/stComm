@@ -120,8 +120,11 @@ namespace detail {
 
 // Shared by an NCCLComm and every request it issues, so whichever wait first
 // sees the communicator fail aborts it exactly once, and ~NCCLComm then skips
-// ncclCommDestroy on the dead handle. `comm` is nulled when the NCCLComm is
-// destroyed so a request that outlives it stops polling the handle.
+// ncclCommDestroy on the dead handle. Once `aborted` is set, `comm` is a
+// destroyed handle (nulled right after the abort) and every pending or later
+// wait/test/submission must fail instead of touching it — aborted work may
+// even look "complete" to its event. `comm` is also nulled when the NCCLComm
+// is destroyed so a request that outlives it stops polling the handle.
 struct NCCLCommState {
     ncclComm_t        comm = nullptr;
     std::atomic<bool> aborted{false};
@@ -139,8 +142,18 @@ inline double ncclWaitTimeoutSec() {
 }
 
 [[noreturn]] inline void abortAndThrow(NCCLCommState& state, const std::string& msg) {
-    if (!state.aborted.exchange(true)) ncclCommAbort(state.comm);
+    if (!state.aborted.exchange(true)) {
+        ncclCommAbort(state.comm);
+        state.comm = nullptr;  // destroyed by the abort — never query it again
+    }
     throw std::runtime_error("stComm NCCL: " + msg);
+}
+
+inline void throwIfAborted(const NCCLCommState* state, const char* what) {
+    if (state != nullptr && state->aborted.load()) {
+        throw std::runtime_error(std::string("stComm NCCL: ") + what +
+                                 ": communicator was aborted after an earlier failure");
+    }
 }
 
 // Wait until `query()` (cudaEventQuery / cudaStreamQuery) stops reporting
@@ -155,6 +168,9 @@ void ncclPollWait(Query query, NCCLCommState* state, const char* what) {
     constexpr std::uint64_t kAsyncCheckInterval = 1024;
     std::chrono::steady_clock::time_point start{};
     for (std::uint64_t n = 1;; ++n) {
+        // Checked before the query: work on an aborted communicator can let
+        // its event fire, which must not be mistaken for success.
+        throwIfAborted(state, what);
         const cudaError_t err = query();
         if (err == cudaSuccess) return;
         if (err != cudaErrorNotReady) STCOMM_CUDA_CHECK(err);
@@ -237,6 +253,7 @@ public:
     void setFinalizer(std::function<void()> fn) { finalizer_ = std::move(fn); }
 
     void wait() override {
+        if (status_ == Status::SUCCESS) return;  // completed before any abort
         if (recorded_) {
             detail::ncclPollWait([this] { return cudaEventQuery(event_); },
                                  state_.get(), "wait");
@@ -245,7 +262,9 @@ public:
     }
 
     bool test() override {
+        if (status_ == Status::SUCCESS) return true;  // completed before any abort
         if (recorded_) {
+            detail::throwIfAborted(state_.get(), "test");
             cudaError_t err = cudaEventQuery(event_);
             if (err == cudaErrorNotReady) {
                 // A caller looping on test() must see a failed communicator

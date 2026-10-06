@@ -8,6 +8,8 @@
 #include <vector>
 #include <random>
 #include <cuda_runtime.h>
+#include <memory>
+#include <stdexcept>
 
 class NCCLCommTest : public ::testing::Test {
 protected:
@@ -609,4 +611,62 @@ TEST_F(NCCLCommTest, AlltoallvDouble) {
 
     cudaFree(d_sendbuf);
     cudaFree(d_recvbuf);
+}
+
+// ============================================================================
+// Abort-state tests (no real fault needed: the shared communicator state is
+// marked aborted by hand, with a null handle — so any code path that still
+// queried the communicator would crash, and one that ignored `aborted` would
+// spin forever or report the aborted work complete).
+// ============================================================================
+
+namespace {
+bool haveGpu() {
+    int n = 0;
+    return cudaGetDeviceCount(&n) == cudaSuccess && n > 0;
+}
+}  // namespace
+
+TEST(NCCLAbortState, PendingRequestsFailAfterAbort) {
+    if (!haveGpu()) GTEST_SKIP() << "needs a GPU";
+    cudaStream_t stream;
+    ASSERT_EQ(cudaStreamCreate(&stream), cudaSuccess);
+    auto state = std::make_shared<stComm::detail::NCCLCommState>();
+    stComm::NCCLRequest a, b;
+    a.record(stream, state);
+    b.record(stream, state);
+    state->aborted = true;
+
+    EXPECT_THROW(a.wait(), std::runtime_error);
+    EXPECT_THROW(a.wait(), std::runtime_error);  // retrying fails too
+    EXPECT_THROW(a.test(), std::runtime_error);
+    EXPECT_THROW(b.wait(), std::runtime_error);  // every other pending request
+    EXPECT_NE(a.getStatus(), stComm::Status::SUCCESS);
+    EXPECT_NE(b.getStatus(), stComm::Status::SUCCESS);
+    cudaStreamDestroy(stream);
+}
+
+TEST(NCCLAbortState, RequestCompletedBeforeAbortStaysComplete) {
+    if (!haveGpu()) GTEST_SKIP() << "needs a GPU";
+    cudaStream_t stream;
+    ASSERT_EQ(cudaStreamCreate(&stream), cudaSuccess);
+    auto state = std::make_shared<stComm::detail::NCCLCommState>();
+    stComm::NCCLRequest done;
+    done.record(stream, state);
+    done.wait();  // empty stream: completes immediately
+    state->aborted = true;
+
+    EXPECT_NO_THROW(done.wait());  // its result was valid before the abort
+    EXPECT_TRUE(done.test());
+    EXPECT_EQ(done.getStatus(), stComm::Status::SUCCESS);
+    cudaStreamDestroy(stream);
+}
+
+TEST(NCCLAbortState, PollWaitThrowsInsteadOfSpinning) {
+    stComm::detail::NCCLCommState state;
+    state.aborted = true;
+    // Without the aborted check this query never completes and the wait spins.
+    EXPECT_THROW(stComm::detail::ncclPollWait([] { return cudaErrorNotReady; },
+                                              &state, "test"),
+                 std::runtime_error);
 }

@@ -184,6 +184,7 @@ std::shared_ptr<NCCLRequest> NCCLComm::send(const T* data, size_t count, int des
     if (!initialized_) {
         return nullptr;
     }
+    detail::throwIfAborted(state_.get(), "submit");
 
     auto req = std::make_shared<NCCLRequest>();
 
@@ -199,6 +200,7 @@ std::shared_ptr<NCCLRequest> NCCLComm::recv(T* data, size_t count, int source) {
     if (!initialized_) {
         return nullptr;
     }
+    detail::throwIfAborted(state_.get(), "submit");
 
     auto req = std::make_shared<NCCLRequest>();
 
@@ -215,6 +217,7 @@ std::shared_ptr<NCCLRequest> NCCLComm::allgatherv(const T* sendbuf, int sendcoun
     if (!initialized_) {
         return nullptr;
     }
+    detail::throwIfAborted(state_.get(), "submit");
 
     auto req = std::make_shared<NCCLRequest>();
 
@@ -256,6 +259,7 @@ std::shared_ptr<NCCLRequest> NCCLComm::alltoallv(const T* sendbuf, const int* se
     if (!initialized_) {
         return nullptr;
     }
+    detail::throwIfAborted(state_.get(), "submit");
 
     auto req = std::make_shared<NCCLRequest>();
 
@@ -295,6 +299,7 @@ std::shared_ptr<NCCLRequest> NCCLComm::bcast(T* data, size_t count, int root) {
     if (!initialized_) {
         return nullptr;
     }
+    detail::throwIfAborted(state_.get(), "submit");
 
     auto req = std::make_shared<NCCLRequest>();
 
@@ -311,6 +316,7 @@ std::shared_ptr<NCCLRequest> NCCLComm::allreduce(const T* sendbuf, T* recvbuf,
     if (!initialized_) {
         return nullptr;
     }
+    detail::throwIfAborted(state_.get(), "submit");
 
     auto req = std::make_shared<NCCLRequest>();
 
@@ -349,6 +355,7 @@ std::shared_ptr<NCCLRequest> NCCLComm::allreduceMaxloc(T value, std::pair<T, int
     if (!initialized_) {
         return nullptr;
     }
+    detail::throwIfAborted(state_.get(), "submit");
 
     // Stage the scalar on the host, gather everyone's value over NCCL, and copy
     // the result back — all enqueued on the internal stream. The scratch keeps
@@ -384,6 +391,7 @@ std::shared_ptr<NCCLRequest> NCCLComm::exscan(T value, T* out, ReduceOp op) {
     if (!initialized_) {
         return nullptr;
     }
+    detail::throwIfAborted(state_.get(), "submit");
 
     // Same gather as allreduceMaxloc; the difference is the host-side reduce.
     auto s = std::make_shared<detail::GatherScratch<T>>();
