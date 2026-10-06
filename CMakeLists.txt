@@ -65,6 +65,13 @@ include_directories(
 
 # Compiler flags
 set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Wall -Wextra")
+# On by default: the tree builds warning-free (Release and Debug). Directory-
+# scoped, so find_package consumers are not affected; turn off locally with
+# -DSTCOMM_WARNINGS_AS_ERRORS=OFF if a newer compiler adds a warning first.
+option(STCOMM_WARNINGS_AS_ERRORS "Treat compiler warnings as errors" ON)
+if(STCOMM_WARNINGS_AS_ERRORS)
+    add_compile_options("$<$<COMPILE_LANGUAGE:CXX>:-Werror>")
+endif()
 set(CMAKE_CXX_FLAGS_RELEASE "${CMAKE_CXX_FLAGS_RELEASE} -O3")
 set(CMAKE_CXX_FLAGS_DEBUG "${CMAKE_CXX_FLAGS_DEBUG} -g -O0")
 
