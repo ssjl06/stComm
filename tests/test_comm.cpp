@@ -13,6 +13,7 @@
 
 #include <gtest/gtest.h>
 #include "stComm/stComm.h"
+#include "test_util.h"
 #include <cuda_runtime.h>
 #include <cstdint>
 #include <vector>
@@ -23,6 +24,7 @@ using stComm::Space;
 using stComm::ReduceOp;
 using stComm::Backend;
 using stComm::NCCLRequest;
+using stComm_test::uz;
 
 class CommFacadeTest : public ::testing::Test {
 protected:
@@ -57,7 +59,7 @@ TEST_F(CommFacadeTest, BcastHost) {
     const int n = 5;
     std::vector<int> buf(n, -1);
     if (rank == root)
-        for (int i = 0; i < n; ++i) buf[i] = 1000 + i;
+        for (int i = 0; i < n; ++i) buf[uz(i)] = 1000 + i;
 
     auto req = comm.bcast<Space::Host>(buf.data(), n, root);
     // Host return is the concrete MPIRequest, symmetric with the device side.
@@ -65,34 +67,34 @@ TEST_F(CommFacadeTest, BcastHost) {
     EXPECT_EQ(req->getBackend(), Backend::MPI);
     req->wait();
 
-    for (int i = 0; i < n; ++i) EXPECT_EQ(buf[i], 1000 + i);
+    for (int i = 0; i < n; ++i) EXPECT_EQ(buf[uz(i)], 1000 + i);
 }
 
 TEST_F(CommFacadeTest, AllgathervHost) {
     Comm comm;
     const int count = 3;
     std::vector<int> send(count);
-    for (int k = 0; k < count; ++k) send[k] = rank * 10 + k;
+    for (int k = 0; k < count; ++k) send[uz(k)] = rank * 10 + k;
 
-    std::vector<int> recvcounts(size, count);
-    std::vector<int> recv(size * count, -1);
+    std::vector<int> recvcounts(uz(size), count);
+    std::vector<int> recv(uz(size * count), -1);
 
     comm.allgatherv<Space::Host>(send.data(), count, recv.data(), recvcounts.data())->wait();
 
     for (int i = 0; i < size; ++i)
         for (int k = 0; k < count; ++k)
-            EXPECT_EQ(recv[i * count + k], i * 10 + k) << "block " << i << " elem " << k;
+            EXPECT_EQ(recv[uz(i * count + k)], i * 10 + k) << "block " << i << " elem " << k;
 }
 
 TEST_F(CommFacadeTest, AlltoallvHost) {
     Comm comm;
     const int per = 2;
-    std::vector<int> sendcounts(size, per), recvcounts(size, per);
-    std::vector<int> send(size * per), recv(size * per, -1);
+    std::vector<int> sendcounts(uz(size), per), recvcounts(uz(size), per);
+    std::vector<int> send(uz(size * per)), recv(uz(size * per), -1);
     // Block destined for peer j encodes (this rank -> j).
     for (int j = 0; j < size; ++j)
         for (int k = 0; k < per; ++k)
-            send[j * per + k] = rank * 100 + j * 10 + k;
+            send[uz(j * per + k)] = rank * 100 + j * 10 + k;
 
     comm.alltoallv<Space::Host>(send.data(), sendcounts.data(),
                                 recv.data(), recvcounts.data())->wait();
@@ -100,7 +102,7 @@ TEST_F(CommFacadeTest, AlltoallvHost) {
     // Block received from peer i was the block i destined for this rank.
     for (int i = 0; i < size; ++i)
         for (int k = 0; k < per; ++k)
-            EXPECT_EQ(recv[i * per + k], i * 100 + rank * 10 + k) << "from " << i << " elem " << k;
+            EXPECT_EQ(recv[uz(i * per + k)], i * 100 + rank * 10 + k) << "from " << i << " elem " << k;
 }
 
 TEST_F(CommFacadeTest, AllreduceMaxlocHost) {
@@ -144,15 +146,15 @@ TEST_F(CommFacadeTest, AllreduceHost) {
     // Element i of this rank contributes rank + i; the sum over ranks is
     // size*(size-1)/2 + size*i, and the max is (size-1) + i.
     std::vector<long> send(n), sum(n, -1), mx(n, -1);
-    for (int i = 0; i < n; ++i) send[i] = rank + i;
+    for (int i = 0; i < n; ++i) send[uz(i)] = rank + i;
 
     comm.allreduce<Space::Host>(send.data(), sum.data(), n, ReduceOp::Sum)->wait();
     comm.allreduce<Space::Host>(send.data(), mx.data(),  n, ReduceOp::Max)->wait();
 
     for (int i = 0; i < n; ++i) {
-        EXPECT_EQ(sum[i], static_cast<long>(size) * (size - 1) / 2
+        EXPECT_EQ(sum[uz(i)], static_cast<long>(size) * (size - 1) / 2
                           + static_cast<long>(size) * i) << "sum elem " << i;
-        EXPECT_EQ(mx[i], static_cast<long>(size - 1) + i)  << "max elem " << i;
+        EXPECT_EQ(mx[uz(i)], static_cast<long>(size - 1) + i)  << "max elem " << i;
     }
 }
 
@@ -173,7 +175,7 @@ TEST_F(CommFacadeTest, BcastDevice) {
     const int n = 5;
     std::vector<int> host(n, -1);
     if (rank == root)
-        for (int i = 0; i < n; ++i) host[i] = 2000 + i;
+        for (int i = 0; i < n; ++i) host[uz(i)] = 2000 + i;
 
     int* dbuf = nullptr;
     cudaMalloc(&dbuf, n * sizeof(int));
@@ -182,12 +184,13 @@ TEST_F(CommFacadeTest, BcastDevice) {
     auto req = comm.bcast<Space::Device>(dbuf, n, root);
     // Device return is the concrete NCCLRequest — getStream() with no cast.
     static_assert(std::is_same_v<decltype(req), stComm::NCCLRequestPtr>);
+    ASSERT_NE(req, nullptr);
     EXPECT_EQ(req->getBackend(), Backend::NCCL);
     EXPECT_NE(req->getStream(), nullptr);
     req->wait();
 
     cudaMemcpy(host.data(), dbuf, n * sizeof(int), cudaMemcpyDeviceToHost);
-    for (int i = 0; i < n; ++i) EXPECT_EQ(host[i], 2000 + i);
+    for (int i = 0; i < n; ++i) EXPECT_EQ(host[uz(i)], 2000 + i);
 
     cudaFree(dbuf);
 }
@@ -224,19 +227,21 @@ TEST_F(CommFacadeTest, AllreduceDevice) {
     // Native ncclAllReduce on int64 device buffers — exact integer sums.
     const int n = 4;
     std::vector<std::int64_t> host(n);
-    for (int i = 0; i < n; ++i) host[i] = rank + i;
+    for (int i = 0; i < n; ++i) host[uz(i)] = rank + i;
 
     std::int64_t *dsend = nullptr, *drecv = nullptr;
     cudaMalloc(&dsend, n * sizeof(std::int64_t));
     cudaMalloc(&drecv, n * sizeof(std::int64_t));
     cudaMemcpy(dsend, host.data(), n * sizeof(std::int64_t), cudaMemcpyHostToDevice);
 
-    comm.allreduce<Space::Device>(dsend, drecv, n, ReduceOp::Sum)->wait();
+    auto req = comm.allreduce<Space::Device>(dsend, drecv, n, ReduceOp::Sum);
+    ASSERT_NE(req, nullptr);
+    req->wait();
 
     std::vector<std::int64_t> got(n, -1);
     cudaMemcpy(got.data(), drecv, n * sizeof(std::int64_t), cudaMemcpyDeviceToHost);
     for (int i = 0; i < n; ++i) {
-        EXPECT_EQ(got[i], static_cast<std::int64_t>(size) * (size - 1) / 2
+        EXPECT_EQ(got[uz(i)], static_cast<std::int64_t>(size) * (size - 1) / 2
                           + static_cast<std::int64_t>(size) * i) << "sum elem " << i;
     }
 

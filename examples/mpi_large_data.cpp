@@ -61,14 +61,15 @@ int main(int argc, char** argv) {
         comm.mpi().recv(data.data(), count, 0, 0)->wait();
         std::cout << "Rank 1: Receive complete!" << std::endl;
 
-        // Verify data (check first, middle, and last elements)
+        // Verify data (check first, middle, and last elements). The transfer
+        // is a byte copy, so compare bit-exact.
         std::cout << "Rank 1: Verifying data..." << std::endl;
         bool verified = true;
 
         // Check first 1000 elements
         for (size_t i = 0; i < 1000 && i < count; ++i) {
             double expected = static_cast<double>(i % 1000000);
-            if (data[i] != expected) {
+            if (std::memcmp(&data[i], &expected, sizeof expected) != 0) {
                 std::cerr << "Verification failed at index " << i
                           << ": expected " << expected << ", got " << data[i] << std::endl;
                 verified = false;
@@ -81,7 +82,7 @@ int main(int argc, char** argv) {
             size_t mid = count / 2;
             for (size_t i = mid; i < mid + 1000 && i < count; ++i) {
                 double expected = static_cast<double>(i % 1000000);
-                if (data[i] != expected) {
+                if (std::memcmp(&data[i], &expected, sizeof expected) != 0) {
                     std::cerr << "Verification failed at index " << i
                               << ": expected " << expected << ", got " << data[i] << std::endl;
                     verified = false;
@@ -94,7 +95,7 @@ int main(int argc, char** argv) {
         if (verified && count > 1000) {
             for (size_t i = count - 1000; i < count; ++i) {
                 double expected = static_cast<double>(i % 1000000);
-                if (data[i] != expected) {
+                if (std::memcmp(&data[i], &expected, sizeof expected) != 0) {
                     std::cerr << "Verification failed at index " << i
                               << ": expected " << expected << ", got " << data[i] << std::endl;
                     verified = false;

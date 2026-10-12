@@ -228,23 +228,26 @@ std::shared_ptr<NCCLRequest> NCCLComm::allgatherv(const T* sendbuf, int sendcoun
 
     // NCCL doesn't have native allgatherv, use grouped send/recv
     STCOMM_NCCL_CHECK(ncclGroupStart());
+    const auto nsend = static_cast<size_t>(sendcount);
     for (int i = 0; i < size_; ++i) {
         if (i == rank_) {
             // Broadcast my data to all others
             for (int j = 0; j < size_; ++j) {
                 if (j != rank_) {
-                    STCOMM_NCCL_CHECK(ncclSend(sendbuf, sendcount, nccl_type, j, comm_, stream_));
+                    STCOMM_NCCL_CHECK(ncclSend(sendbuf, nsend, nccl_type, j, comm_, stream_));
                 }
             }
             // Copy my own data
-            if (recvbuf + displs[rank_] != sendbuf) {
-                STCOMM_CUDA_CHECK(cudaMemcpyAsync(recvbuf + displs[rank_], sendbuf,
-                                                  sendcount * sizeof(T),
+            T* mine = recvbuf + displs[static_cast<size_t>(rank_)];
+            if (mine != sendbuf) {
+                STCOMM_CUDA_CHECK(cudaMemcpyAsync(mine, sendbuf, nsend * sizeof(T),
                                                   cudaMemcpyDeviceToDevice, stream_));
             }
         } else {
             // Receive from rank i
-            STCOMM_NCCL_CHECK(ncclRecv(recvbuf + displs[i], recvcounts[i], nccl_type, i, comm_, stream_));
+            STCOMM_NCCL_CHECK(ncclRecv(recvbuf + displs[static_cast<size_t>(i)],
+                                       static_cast<size_t>(recvcounts[i]),
+                                       nccl_type, i, comm_, stream_));
         }
     }
     STCOMM_NCCL_CHECK(ncclGroupEnd());
@@ -272,18 +275,21 @@ std::shared_ptr<NCCLRequest> NCCLComm::alltoallv(const T* sendbuf, const int* se
     // NCCL doesn't have native alltoallv, use grouped send/recv
     STCOMM_NCCL_CHECK(ncclGroupStart());
     for (int i = 0; i < size_; ++i) {
+        const auto ui = static_cast<size_t>(i);
+        const T* src = sendbuf + sdispls[ui];
+        T* dst = recvbuf + rdispls[ui];
         if (i != rank_) {
             if (sendcounts[i] > 0) {
-                STCOMM_NCCL_CHECK(ncclSend(sendbuf + sdispls[i], sendcounts[i], nccl_type, i, comm_, stream_));
+                STCOMM_NCCL_CHECK(ncclSend(src, static_cast<size_t>(sendcounts[i]), nccl_type, i, comm_, stream_));
             }
             if (recvcounts[i] > 0) {
-                STCOMM_NCCL_CHECK(ncclRecv(recvbuf + rdispls[i], recvcounts[i], nccl_type, i, comm_, stream_));
+                STCOMM_NCCL_CHECK(ncclRecv(dst, static_cast<size_t>(recvcounts[i]), nccl_type, i, comm_, stream_));
             }
         } else {
             // Self-copy
-            if (sendcounts[rank_] > 0 && (recvbuf + rdispls[rank_] != sendbuf + sdispls[rank_])) {
-                STCOMM_CUDA_CHECK(cudaMemcpyAsync(recvbuf + rdispls[rank_], sendbuf + sdispls[rank_],
-                                                  sendcounts[rank_] * sizeof(T),
+            if (sendcounts[i] > 0 && dst != src) {
+                STCOMM_CUDA_CHECK(cudaMemcpyAsync(dst, src,
+                                                  static_cast<size_t>(sendcounts[i]) * sizeof(T),
                                                   cudaMemcpyDeviceToDevice, stream_));
             }
         }
@@ -362,25 +368,25 @@ std::shared_ptr<NCCLRequest> NCCLComm::allreduceMaxloc(T value, std::pair<T, int
     // these buffers alive until the request completes (see request.h).
     auto s = std::make_shared<detail::GatherScratch<T>>();
     s->hsend = value;
-    s->host.resize(size_);
+    const auto nranks = static_cast<size_t>(size_);
+    s->host.resize(nranks);
     STCOMM_CUDA_CHECK(cudaMalloc(&s->d_send, sizeof(T)));
-    STCOMM_CUDA_CHECK(cudaMalloc(&s->d_recv, size_ * sizeof(T)));
+    STCOMM_CUDA_CHECK(cudaMalloc(&s->d_recv, nranks * sizeof(T)));
 
     STCOMM_CUDA_CHECK(cudaMemcpyAsync(s->d_send, &s->hsend, sizeof(T), cudaMemcpyHostToDevice, stream_));
     STCOMM_NCCL_CHECK(ncclAllGather(s->d_send, s->d_recv, 1, NCCLTypeMap<T>::type(), comm_, stream_));
-    STCOMM_CUDA_CHECK(cudaMemcpyAsync(s->host.data(), s->d_recv, size_ * sizeof(T),
+    STCOMM_CUDA_CHECK(cudaMemcpyAsync(s->host.data(), s->d_recv, nranks * sizeof(T),
                                       cudaMemcpyDeviceToHost, stream_));
 
     auto req = std::make_shared<NCCLRequest>();
     req->setScratch(s);
-    const int n = size_;
     // Runs once after the stream drains: argmax over the gathered values. Ties
     // go to the smaller rank (strict >), matching MPI_MAXLOC semantics.
-    req->setFinalizer([s, out, n]() {
-        int best = 0;
-        for (int i = 1; i < n; ++i)
+    req->setFinalizer([s, out, nranks]() {
+        size_t best = 0;
+        for (size_t i = 1; i < nranks; ++i)
             if (s->host[i] > s->host[best]) best = i;
-        *out = { s->host[best], best };
+        *out = { s->host[best], static_cast<int>(best) };
     });
     recordOrDefer(req);
     return req;
@@ -396,25 +402,26 @@ std::shared_ptr<NCCLRequest> NCCLComm::exscan(T value, T* out, ReduceOp op) {
     // Same gather as allreduceMaxloc; the difference is the host-side reduce.
     auto s = std::make_shared<detail::GatherScratch<T>>();
     s->hsend = value;
-    s->host.resize(size_);
+    const auto nranks = static_cast<size_t>(size_);
+    s->host.resize(nranks);
     STCOMM_CUDA_CHECK(cudaMalloc(&s->d_send, sizeof(T)));
-    STCOMM_CUDA_CHECK(cudaMalloc(&s->d_recv, size_ * sizeof(T)));
+    STCOMM_CUDA_CHECK(cudaMalloc(&s->d_recv, nranks * sizeof(T)));
 
     STCOMM_CUDA_CHECK(cudaMemcpyAsync(s->d_send, &s->hsend, sizeof(T), cudaMemcpyHostToDevice, stream_));
     STCOMM_NCCL_CHECK(ncclAllGather(s->d_send, s->d_recv, 1, NCCLTypeMap<T>::type(), comm_, stream_));
-    STCOMM_CUDA_CHECK(cudaMemcpyAsync(s->host.data(), s->d_recv, size_ * sizeof(T),
+    STCOMM_CUDA_CHECK(cudaMemcpyAsync(s->host.data(), s->d_recv, nranks * sizeof(T),
                                       cudaMemcpyDeviceToHost, stream_));
 
     auto req = std::make_shared<NCCLRequest>();
     req->setScratch(s);
-    const int rank = rank_;
+    const auto rank = static_cast<size_t>(rank_);
     // Runs once after the stream drains: exclusive scan over ranks [0, rank).
     // Rank 0 returns T{} to match MPIComm::exscan (MPI_Exscan leaves rank 0
     // undefined).
     req->setFinalizer([s, out, op, rank]() {
         if (rank == 0) { *out = T{}; return; }
         T acc = s->host[0];
-        for (int i = 1; i < rank; ++i)
+        for (size_t i = 1; i < rank; ++i)
             acc = detail::apply_reduce(op, acc, s->host[i]);
         *out = acc;
     });

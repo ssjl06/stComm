@@ -11,6 +11,7 @@
 #include "stComm/stComm.h"
 #include <iostream>
 #include <vector>
+#include <cstring>
 
 int main(int argc, char** argv) {
     stComm::Comm::initialize(&argc, &argv);
@@ -37,7 +38,7 @@ int main(int argc, char** argv) {
 
     // Each rank prepares its own data
     for (int i = 0; i < N; ++i) {
-        send_data[i] = rank * 1000.0 + i;
+        send_data[static_cast<size_t>(i)] = rank * 1000.0 + i;
     }
 
     std::cout << "Rank " << rank << ": Sending to " << next
@@ -52,11 +53,11 @@ int main(int argc, char** argv) {
     send_req->wait();
     recv_req->wait();
 
-    // Verify received data
+    // Verify received data. The transfer is a byte copy, so compare bit-exact.
     bool success = true;
     for (int i = 0; i < N; ++i) {
         double expected = prev * 1000.0 + i;
-        if (recv_data[i] != expected) {
+        if (std::memcmp(&recv_data[static_cast<size_t>(i)], &expected, sizeof expected) != 0) {
             success = false;
             break;
         }

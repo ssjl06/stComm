@@ -8,6 +8,7 @@ set(STCOMM_SOURCES
 
 # Create shared library
 add_library(stComm SHARED ${STCOMM_SOURCES})
+enable_compiler_warnings(stComm)
 
 # Set library properties
 set_target_properties(stComm PROPERTIES

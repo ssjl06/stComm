@@ -74,11 +74,12 @@ struct ByteLayout {
 
 inline ByteLayout byteLayout(const int* counts, int nranks, std::size_t elem_size,
                              const char* op) {
+    const auto n = static_cast<std::size_t>(nranks);
     ByteLayout l;
-    l.counts.resize(nranks);
-    l.displs.resize(nranks);
+    l.counts.resize(n);
+    l.displs.resize(n);
     std::int64_t offset = 0;  // in elements
-    for (int i = 0; i < nranks; ++i) {
+    for (std::size_t i = 0; i < n; ++i) {
         l.displs[i] = checkedBytes(offset, elem_size, op);
         l.counts[i] = checkedBytes(counts[i], elem_size, op);
         offset += counts[i];
@@ -196,7 +197,7 @@ std::shared_ptr<MPIRequest> MPIComm::send(const T* data, size_t count, int dest,
     if (total_bytes <= static_cast<size_t>(INT_MAX)) {
         // Small data: single MPI call
         auto req = std::make_shared<MPIRequest>();
-        STCOMM_MPI_CHECK(MPI_Isend(data, total_bytes, MPI_BYTE, dest, tag, comm_, &req->getHandle()));
+        STCOMM_MPI_CHECK(MPI_Isend(data, static_cast<int>(total_bytes), MPI_BYTE, dest, tag, comm_, &req->getHandle()));
         return req;
     }
 
@@ -226,7 +227,7 @@ std::shared_ptr<MPIRequest> MPIComm::recv(T* data, size_t count, int source, int
     if (total_bytes <= static_cast<size_t>(INT_MAX)) {
         // Small data: single MPI call
         auto req = std::make_shared<MPIRequest>();
-        STCOMM_MPI_CHECK(MPI_Irecv(data, total_bytes, MPI_BYTE, source, tag, comm_, &req->getHandle()));
+        STCOMM_MPI_CHECK(MPI_Irecv(data, static_cast<int>(total_bytes), MPI_BYTE, source, tag, comm_, &req->getHandle()));
         return req;
     }
 

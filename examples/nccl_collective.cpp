@@ -49,24 +49,24 @@ int main(int argc, char** argv) {
         // Each GPU sends different amount: (rank+1)*100 elements
         int sendcount = (rank + 1) * 100;
 
-        std::vector<int> recvcounts(size);
+        std::vector<int> recvcounts(static_cast<size_t>(size));
         for (int i = 0; i < size; ++i) {
-            recvcounts[i] = (i + 1) * 100;
+            recvcounts[static_cast<size_t>(i)] = (i + 1) * 100;
         }
 
         int total_recv = stComm::Utils::totalSize(recvcounts);
 
         // Allocate GPU memory
         int *d_sendbuf, *d_recvbuf;
-        cudaMalloc(&d_sendbuf, sendcount * sizeof(int));
-        cudaMalloc(&d_recvbuf, total_recv * sizeof(int));
+        cudaMalloc(&d_sendbuf, static_cast<size_t>(sendcount) * sizeof(int));
+        cudaMalloc(&d_recvbuf, static_cast<size_t>(total_recv) * sizeof(int));
 
         // Initialize send buffer on host
-        std::vector<int> h_sendbuf(sendcount);
+        std::vector<int> h_sendbuf(static_cast<size_t>(sendcount));
         for (int i = 0; i < sendcount; ++i) {
-            h_sendbuf[i] = rank * 10000 + i;
+            h_sendbuf[static_cast<size_t>(i)] = rank * 10000 + i;
         }
-        cudaMemcpy(d_sendbuf, h_sendbuf.data(), sendcount * sizeof(int),
+        cudaMemcpy(d_sendbuf, h_sendbuf.data(), static_cast<size_t>(sendcount) * sizeof(int),
                    cudaMemcpyHostToDevice);
 
         // allgatherv on device memory — Space::Device routes it to NCCL.
@@ -74,16 +74,17 @@ int main(int argc, char** argv) {
                                                  d_recvbuf, recvcounts.data())->wait();
 
         // Verify results
-        std::vector<int> h_recvbuf(total_recv);
-        cudaMemcpy(h_recvbuf.data(), d_recvbuf, total_recv * sizeof(int),
+        std::vector<int> h_recvbuf(static_cast<size_t>(total_recv));
+        cudaMemcpy(h_recvbuf.data(), d_recvbuf, static_cast<size_t>(total_recv) * sizeof(int),
                    cudaMemcpyDeviceToHost);
 
         auto displs = stComm::Utils::calculateDisplacements(recvcounts);
         bool success = true;
         for (int r = 0; r < size; ++r) {
-            for (int i = 0; i < recvcounts[r]; ++i) {
+            const auto ur = static_cast<size_t>(r);
+            for (int i = 0; i < recvcounts[ur]; ++i) {
                 int expected = r * 10000 + i;
-                if (h_recvbuf[displs[r] + i] != expected) {
+                if (h_recvbuf[static_cast<size_t>(displs[ur] + i)] != expected) {
                     success = false;
                     std::cerr << "GPU " << device_id << ": allgatherv verification failed!"
                               << std::endl;
@@ -109,26 +110,27 @@ int main(int argc, char** argv) {
         std::cout << "\nGPU " << device_id << ": Testing alltoallv..." << std::endl;
 
         // Each GPU sends 50 elements to every other GPU
-        std::vector<int> sendcounts(size, 50);
-        std::vector<int> recvcounts(size, 50);
+        std::vector<int> sendcounts(static_cast<size_t>(size), 50);
+        std::vector<int> recvcounts(static_cast<size_t>(size), 50);
 
         int total_send = stComm::Utils::totalSize(sendcounts);
         int total_recv = stComm::Utils::totalSize(recvcounts);
 
         // Allocate GPU memory
         int *d_sendbuf, *d_recvbuf;
-        cudaMalloc(&d_sendbuf, total_send * sizeof(int));
-        cudaMalloc(&d_recvbuf, total_recv * sizeof(int));
+        cudaMalloc(&d_sendbuf, static_cast<size_t>(total_send) * sizeof(int));
+        cudaMalloc(&d_recvbuf, static_cast<size_t>(total_recv) * sizeof(int));
 
         // Initialize send buffer
-        std::vector<int> h_sendbuf(total_send);
+        std::vector<int> h_sendbuf(static_cast<size_t>(total_send));
         auto send_displs = stComm::Utils::calculateDisplacements(sendcounts);
         for (int dest = 0; dest < size; ++dest) {
-            for (int i = 0; i < sendcounts[dest]; ++i) {
-                h_sendbuf[send_displs[dest] + i] = rank * 100000 + dest * 1000 + i;
+            const auto ud = static_cast<size_t>(dest);
+            for (int i = 0; i < sendcounts[ud]; ++i) {
+                h_sendbuf[static_cast<size_t>(send_displs[ud] + i)] = rank * 100000 + dest * 1000 + i;
             }
         }
-        cudaMemcpy(d_sendbuf, h_sendbuf.data(), total_send * sizeof(int),
+        cudaMemcpy(d_sendbuf, h_sendbuf.data(), static_cast<size_t>(total_send) * sizeof(int),
                    cudaMemcpyHostToDevice);
 
         // alltoallv on device memory — Space::Device routes it to NCCL.
@@ -136,16 +138,17 @@ int main(int argc, char** argv) {
                                                 d_recvbuf, recvcounts.data())->wait();
 
         // Verify results
-        std::vector<int> h_recvbuf(total_recv);
-        cudaMemcpy(h_recvbuf.data(), d_recvbuf, total_recv * sizeof(int),
+        std::vector<int> h_recvbuf(static_cast<size_t>(total_recv));
+        cudaMemcpy(h_recvbuf.data(), d_recvbuf, static_cast<size_t>(total_recv) * sizeof(int),
                    cudaMemcpyDeviceToHost);
 
         auto recv_displs = stComm::Utils::calculateDisplacements(recvcounts);
         bool success = true;
         for (int src = 0; src < size; ++src) {
-            for (int i = 0; i < recvcounts[src]; ++i) {
+            const auto us = static_cast<size_t>(src);
+            for (int i = 0; i < recvcounts[us]; ++i) {
                 int expected = src * 100000 + rank * 1000 + i;
-                if (h_recvbuf[recv_displs[src] + i] != expected) {
+                if (h_recvbuf[static_cast<size_t>(recv_displs[us] + i)] != expected) {
                     success = false;
                     std::cerr << "GPU " << device_id << ": alltoallv verification failed!"
                               << std::endl;
