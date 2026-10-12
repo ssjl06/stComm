@@ -13,6 +13,7 @@
 #include <iostream>
 #include <vector>
 #include <cuda_runtime.h>
+#include <cstring>
 
 int main(int argc, char** argv) {
     stComm::Comm::initialize(&argc, &argv);
@@ -60,7 +61,7 @@ int main(int argc, char** argv) {
     // Initialize send data on host
     std::vector<float> h_send_data(N);
     for (int i = 0; i < N; ++i) {
-        h_send_data[i] = rank * 1000.0f + i;
+        h_send_data[static_cast<size_t>(i)] = static_cast<float>(rank) * 1000.0f + static_cast<float>(i);
     }
 
     // Copy to GPU
@@ -85,14 +86,14 @@ int main(int argc, char** argv) {
     std::vector<float> h_recv_data(N);
     cudaMemcpy(h_recv_data.data(), d_recv_data, N * sizeof(float), cudaMemcpyDeviceToHost);
 
-    // Verify results
+    // Verify results. The transfer is a byte copy, so compare bit-exact.
     bool success = true;
     for (int i = 0; i < N; ++i) {
-        float expected = prev * 1000.0f + i;
-        if (h_recv_data[i] != expected) {
+        float expected = static_cast<float>(prev) * 1000.0f + static_cast<float>(i);
+        if (std::memcmp(&h_recv_data[static_cast<size_t>(i)], &expected, sizeof expected) != 0) {
             success = false;
             std::cerr << "Rank " << rank << ": Data verification failed at index " << i
-                      << " (expected " << expected << ", got " << h_recv_data[i] << ")"
+                      << " (expected " << expected << ", got " << h_recv_data[static_cast<size_t>(i)] << ")"
                       << std::endl;
             break;
         }

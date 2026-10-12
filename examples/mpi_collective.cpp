@@ -31,20 +31,20 @@ int main(int argc, char** argv) {
 
         // Each rank sends (rank+1)*10 elements
         int sendcount = (rank + 1) * 10;
-        std::vector<int> sendbuf(sendcount);
+        std::vector<int> sendbuf(static_cast<size_t>(sendcount));
         for (int i = 0; i < sendcount; ++i) {
-            sendbuf[i] = rank * 100 + i;
+            sendbuf[static_cast<size_t>(i)] = rank * 100 + i;
         }
 
         // Prepare receive counts (each rank will receive different amounts)
-        std::vector<int> recvcounts(size);
+        std::vector<int> recvcounts(static_cast<size_t>(size));
         for (int i = 0; i < size; ++i) {
-            recvcounts[i] = (i + 1) * 10;
+            recvcounts[static_cast<size_t>(i)] = (i + 1) * 10;
         }
 
         // Calculate total receive size
         int total_recv = stComm::Utils::totalSize(recvcounts);
-        std::vector<int> recvbuf(total_recv);
+        std::vector<int> recvbuf(static_cast<size_t>(total_recv));
 
         // Call allgatherv - displacement is automatically calculated!
         comm.allgatherv<stComm::Space::Host>(sendbuf.data(), sendcount,
@@ -54,9 +54,10 @@ int main(int argc, char** argv) {
         auto displs = stComm::Utils::calculateDisplacements(recvcounts);
         bool success = true;
         for (int r = 0; r < size; ++r) {
-            for (int i = 0; i < recvcounts[r]; ++i) {
+            const auto ur = static_cast<size_t>(r);
+            for (int i = 0; i < recvcounts[ur]; ++i) {
                 int expected = r * 100 + i;
-                if (recvbuf[displs[r] + i] != expected) {
+                if (recvbuf[static_cast<size_t>(displs[ur] + i)] != expected) {
                     success = false;
                     std::cerr << "Rank " << rank << ": allgatherv verification failed!" << std::endl;
                     break;
@@ -77,27 +78,28 @@ int main(int argc, char** argv) {
         std::cout << "\nRank " << rank << ": Testing alltoallv..." << std::endl;
 
         // Each rank sends different amounts to each destination
-        std::vector<int> sendcounts(size);
-        std::vector<int> recvcounts(size);
+        std::vector<int> sendcounts(static_cast<size_t>(size));
+        std::vector<int> recvcounts(static_cast<size_t>(size));
 
         // Rank i sends (i+1) elements to rank j
         // Rank i receives (j+1) elements from rank j
         for (int i = 0; i < size; ++i) {
-            sendcounts[i] = rank + 1;
-            recvcounts[i] = i + 1;
+            sendcounts[static_cast<size_t>(i)] = rank + 1;
+            recvcounts[static_cast<size_t>(i)] = i + 1;
         }
 
         int total_send = stComm::Utils::totalSize(sendcounts);
         int total_recv = stComm::Utils::totalSize(recvcounts);
 
-        std::vector<int> sendbuf(total_send);
-        std::vector<int> recvbuf(total_recv);
+        std::vector<int> sendbuf(static_cast<size_t>(total_send));
+        std::vector<int> recvbuf(static_cast<size_t>(total_recv));
 
         // Fill send buffer with data for each destination
         auto send_displs = stComm::Utils::calculateDisplacements(sendcounts);
         for (int dest = 0; dest < size; ++dest) {
-            for (int i = 0; i < sendcounts[dest]; ++i) {
-                sendbuf[send_displs[dest] + i] = rank * 1000 + dest * 100 + i;
+            const auto ud = static_cast<size_t>(dest);
+            for (int i = 0; i < sendcounts[ud]; ++i) {
+                sendbuf[static_cast<size_t>(send_displs[ud] + i)] = rank * 1000 + dest * 100 + i;
             }
         }
 
@@ -109,9 +111,10 @@ int main(int argc, char** argv) {
         auto recv_displs = stComm::Utils::calculateDisplacements(recvcounts);
         bool success = true;
         for (int src = 0; src < size; ++src) {
-            for (int i = 0; i < recvcounts[src]; ++i) {
+            const auto us = static_cast<size_t>(src);
+            for (int i = 0; i < recvcounts[us]; ++i) {
                 int expected = src * 1000 + rank * 100 + i;
-                if (recvbuf[recv_displs[src] + i] != expected) {
+                if (recvbuf[static_cast<size_t>(recv_displs[us] + i)] != expected) {
                     success = false;
                     std::cerr << "Rank " << rank << ": alltoallv verification failed!" << std::endl;
                     break;

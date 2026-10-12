@@ -20,6 +20,7 @@ set(TEST_SOURCES
 
 # Create test executable
 add_executable(stComm_tests ${TEST_SOURCES})
+enable_compiler_warnings(stComm_tests)
 
 # Link libraries
 target_link_libraries(stComm_tests

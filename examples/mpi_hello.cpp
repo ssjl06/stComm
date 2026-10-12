@@ -30,7 +30,7 @@ int main(int argc, char** argv) {
 
         if (rank == 0) {
             for (int i = 0; i < 10; ++i) {
-                data[i] = i * 10;
+                data[static_cast<size_t>(i)] = i * 10;
             }
 
             std::cout << "Rank 0: Sending data to rank 1" << std::endl;

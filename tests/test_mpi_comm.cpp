@@ -5,6 +5,7 @@
 
 #include <gtest/gtest.h>
 #include "stComm/stComm.h"
+#include "test_util.h"
 #include <vector>
 #include <random>
 #include <algorithm>
@@ -12,6 +13,8 @@
 #include <cstdint>
 #include <cstring>
 #include <stdexcept>
+
+using stComm_test::uz;
 
 class MPICommTest : public ::testing::Test {
 protected:
@@ -21,7 +24,7 @@ protected:
         size = comm->getSize();
 
         // Initialize random generator with rank-based seed for reproducibility
-        rng.seed(12345 + rank);
+        rng.seed(static_cast<std::mt19937::result_type>(12345 + rank));
     }
 
     void TearDown() override {
@@ -117,7 +120,7 @@ TEST_F(MPICommTest, SendRecvInt) {
     // Only rank 1 verifies
     if (rank == 1) {
         for (int i = 0; i < N; ++i) {
-            EXPECT_EQ(recv_data[i], send_data[i]) << "Mismatch at index " << i;
+            EXPECT_EQ(recv_data[uz(i)], send_data[uz(i)]) << "Mismatch at index " << i;
         }
     }
 }
@@ -147,7 +150,7 @@ TEST_F(MPICommTest, SendRecvDouble) {
     // Only rank 1 verifies
     if (rank == 1) {
         for (int i = 0; i < N; ++i) {
-            EXPECT_DOUBLE_EQ(recv_data[i], send_data[i]) << "Mismatch at index " << i;
+            EXPECT_DOUBLE_EQ(recv_data[uz(i)], send_data[uz(i)]) << "Mismatch at index " << i;
         }
     }
 }
@@ -177,7 +180,7 @@ TEST_F(MPICommTest, SendRecvFloat) {
     // Only rank 1 verifies
     if (rank == 1) {
         for (int i = 0; i < N; ++i) {
-            EXPECT_FLOAT_EQ(recv_data[i], send_data[i]) << "Mismatch at index " << i;
+            EXPECT_FLOAT_EQ(recv_data[uz(i)], send_data[uz(i)]) << "Mismatch at index " << i;
         }
     }
 }
@@ -199,13 +202,13 @@ TEST_F(MPICommTest, SendRecvRingPattern) {
     recv_req->wait();
 
     // Gather all data to verify ring pattern
-    std::vector<int> all_data(N * size);
+    std::vector<int> all_data(uz(N * size));
     MPI_Allgather(send_data.data(), N * sizeof(int), MPI_BYTE,
                   all_data.data(), N * sizeof(int), MPI_BYTE, MPI_COMM_WORLD);
 
     // Verify received from previous rank
     for (int i = 0; i < N; ++i) {
-        EXPECT_EQ(recv_data[i], all_data[prev * N + i]) << "Ring pattern failed at index " << i;
+        EXPECT_EQ(recv_data[uz(i)], all_data[uz(prev * N + i)]) << "Ring pattern failed at index " << i;
     }
 }
 
@@ -283,9 +286,9 @@ TEST_F(MPICommTest, AllgathervUniformCounts) {
     std::vector<int> sendbuf(sendcount);
     fillRandom(sendbuf);
 
-    std::vector<int> recvcounts(size, sendcount);
+    std::vector<int> recvcounts(uz(size), sendcount);
     int total_recv = stComm::Utils::totalSize(recvcounts);
-    std::vector<int> recvbuf(total_recv);
+    std::vector<int> recvbuf(uz(total_recv));
 
     auto req = comm->allgatherv(sendbuf.data(), sendcount, recvbuf.data(), recvcounts.data());
     EXPECT_NE(req, nullptr);
@@ -293,62 +296,62 @@ TEST_F(MPICommTest, AllgathervUniformCounts) {
     EXPECT_EQ(req->getStatus(), stComm::Status::SUCCESS);
 
     // Verify by comparing with MPI_Allgather
-    std::vector<int> expected(total_recv);
+    std::vector<int> expected(uz(total_recv));
     MPI_Allgather(sendbuf.data(), sendcount * sizeof(int), MPI_BYTE,
                   expected.data(), sendcount * sizeof(int), MPI_BYTE, MPI_COMM_WORLD);
 
     for (int i = 0; i < total_recv; ++i) {
-        EXPECT_EQ(recvbuf[i], expected[i]) << "Allgatherv mismatch at index " << i;
+        EXPECT_EQ(recvbuf[uz(i)], expected[uz(i)]) << "Allgatherv mismatch at index " << i;
     }
 }
 
 TEST_F(MPICommTest, AllgathervVariableCounts) {
     // Each rank sends different amount
     int sendcount = (rank + 1) * 50;
-    std::vector<int> sendbuf(sendcount);
+    std::vector<int> sendbuf(uz(sendcount));
     fillRandom(sendbuf);
 
-    std::vector<int> recvcounts(size);
+    std::vector<int> recvcounts(uz(size));
     for (int i = 0; i < size; ++i) {
-        recvcounts[i] = (i + 1) * 50;
+        recvcounts[uz(i)] = (i + 1) * 50;
     }
 
     int total_recv = stComm::Utils::totalSize(recvcounts);
-    std::vector<int> recvbuf(total_recv);
+    std::vector<int> recvbuf(uz(total_recv));
 
     auto req = comm->allgatherv(sendbuf.data(), sendcount, recvbuf.data(), recvcounts.data());
     req->wait();
 
     // Verify with manual allgather
     auto displs = stComm::Utils::calculateDisplacements(recvcounts);
-    std::vector<int> expected(total_recv);
+    std::vector<int> expected(uz(total_recv));
 
-    std::vector<int> byte_recvcounts(size);
-    std::vector<int> byte_displs(size);
+    std::vector<int> byte_recvcounts(uz(size));
+    std::vector<int> byte_displs(uz(size));
     for (int i = 0; i < size; ++i) {
-        byte_recvcounts[i] = recvcounts[i] * sizeof(int);
-        byte_displs[i] = displs[i] * sizeof(int);
+        byte_recvcounts[uz(i)] = recvcounts[uz(i)] * static_cast<int>(sizeof(int));
+        byte_displs[uz(i)] = displs[uz(i)] * static_cast<int>(sizeof(int));
     }
 
-    MPI_Allgatherv(sendbuf.data(), sendcount * sizeof(int), MPI_BYTE,
+    MPI_Allgatherv(sendbuf.data(), sendcount * static_cast<int>(sizeof(int)), MPI_BYTE,
                    expected.data(), byte_recvcounts.data(), byte_displs.data(),
                    MPI_BYTE, MPI_COMM_WORLD);
 
     for (int i = 0; i < total_recv; ++i) {
-        EXPECT_EQ(recvbuf[i], expected[i]) << "Variable allgatherv mismatch at index " << i;
+        EXPECT_EQ(recvbuf[uz(i)], expected[uz(i)]) << "Variable allgatherv mismatch at index " << i;
     }
 }
 
 TEST_F(MPICommTest, AlltoallvUniformCounts) {
     const int count_per_rank = 50;
-    std::vector<int> sendcounts(size, count_per_rank);
-    std::vector<int> recvcounts(size, count_per_rank);
+    std::vector<int> sendcounts(uz(size), count_per_rank);
+    std::vector<int> recvcounts(uz(size), count_per_rank);
 
     int total_send = stComm::Utils::totalSize(sendcounts);
     int total_recv = stComm::Utils::totalSize(recvcounts);
 
-    std::vector<int> sendbuf(total_send);
-    std::vector<int> recvbuf(total_recv);
+    std::vector<int> sendbuf(uz(total_send));
+    std::vector<int> recvbuf(uz(total_recv));
 
     fillRandom(sendbuf);
 
@@ -359,31 +362,31 @@ TEST_F(MPICommTest, AlltoallvUniformCounts) {
     EXPECT_EQ(req->getStatus(), stComm::Status::SUCCESS);
 
     // Verify with MPI_Alltoall
-    std::vector<int> expected(total_recv);
+    std::vector<int> expected(uz(total_recv));
     MPI_Alltoall(sendbuf.data(), count_per_rank * sizeof(int), MPI_BYTE,
                  expected.data(), count_per_rank * sizeof(int), MPI_BYTE,
                  MPI_COMM_WORLD);
 
     for (int i = 0; i < total_recv; ++i) {
-        EXPECT_EQ(recvbuf[i], expected[i]) << "Alltoallv uniform mismatch at index " << i;
+        EXPECT_EQ(recvbuf[uz(i)], expected[uz(i)]) << "Alltoallv uniform mismatch at index " << i;
     }
 }
 
 TEST_F(MPICommTest, AlltoallvVariableCounts) {
-    std::vector<int> sendcounts(size);
-    std::vector<int> recvcounts(size);
+    std::vector<int> sendcounts(uz(size));
+    std::vector<int> recvcounts(uz(size));
 
     // Rank i sends (i+1)*10 to rank j, receives (j+1)*10 from rank j
     for (int i = 0; i < size; ++i) {
-        sendcounts[i] = (rank + 1) * 10;
-        recvcounts[i] = (i + 1) * 10;
+        sendcounts[uz(i)] = (rank + 1) * 10;
+        recvcounts[uz(i)] = (i + 1) * 10;
     }
 
     int total_send = stComm::Utils::totalSize(sendcounts);
     int total_recv = stComm::Utils::totalSize(recvcounts);
 
-    std::vector<int> sendbuf(total_send);
-    std::vector<int> recvbuf(total_recv);
+    std::vector<int> sendbuf(uz(total_send));
+    std::vector<int> recvbuf(uz(total_recv));
 
     fillRandom(sendbuf);
 
@@ -395,25 +398,25 @@ TEST_F(MPICommTest, AlltoallvVariableCounts) {
     auto sdispls = stComm::Utils::calculateDisplacements(sendcounts);
     auto rdispls = stComm::Utils::calculateDisplacements(recvcounts);
 
-    std::vector<int> byte_sendcounts(size);
-    std::vector<int> byte_sdispls(size);
-    std::vector<int> byte_recvcounts(size);
-    std::vector<int> byte_rdispls(size);
+    std::vector<int> byte_sendcounts(uz(size));
+    std::vector<int> byte_sdispls(uz(size));
+    std::vector<int> byte_recvcounts(uz(size));
+    std::vector<int> byte_rdispls(uz(size));
 
     for (int i = 0; i < size; ++i) {
-        byte_sendcounts[i] = sendcounts[i] * sizeof(int);
-        byte_sdispls[i] = sdispls[i] * sizeof(int);
-        byte_recvcounts[i] = recvcounts[i] * sizeof(int);
-        byte_rdispls[i] = rdispls[i] * sizeof(int);
+        byte_sendcounts[uz(i)] = sendcounts[uz(i)] * static_cast<int>(sizeof(int));
+        byte_sdispls[uz(i)] = sdispls[uz(i)] * static_cast<int>(sizeof(int));
+        byte_recvcounts[uz(i)] = recvcounts[uz(i)] * static_cast<int>(sizeof(int));
+        byte_rdispls[uz(i)] = rdispls[uz(i)] * static_cast<int>(sizeof(int));
     }
 
-    std::vector<int> expected(total_recv);
+    std::vector<int> expected(uz(total_recv));
     MPI_Alltoallv(sendbuf.data(), byte_sendcounts.data(), byte_sdispls.data(), MPI_BYTE,
                   expected.data(), byte_recvcounts.data(), byte_rdispls.data(), MPI_BYTE,
                   MPI_COMM_WORLD);
 
     for (int i = 0; i < total_recv; ++i) {
-        EXPECT_EQ(recvbuf[i], expected[i]) << "Variable alltoallv mismatch at index " << i;
+        EXPECT_EQ(recvbuf[uz(i)], expected[uz(i)]) << "Variable alltoallv mismatch at index " << i;
     }
 }
 
@@ -426,7 +429,7 @@ TEST_F(MPICommTest, AlltoallvVariableCounts) {
 // Every rank passes the same oversized counts, so all throw before any MPI
 // call (no buffers are touched — nullptr is fine).
 TEST_F(MPICommTest, VCollectivesRejectByteCountOverflow) {
-    std::vector<int> counts(size, INT_MAX / 4);  // × 8 B per int64 > INT_MAX
+    std::vector<int> counts(uz(size), INT_MAX / 4);  // × 8 B per int64 > INT_MAX
     EXPECT_THROW(comm->alltoallv<std::int64_t>(nullptr, counts.data(),
                                                nullptr, counts.data()),
                  std::overflow_error);
@@ -505,7 +508,7 @@ TEST_F(MPICommTest, SendRecvInt8) {
     // Only rank 1 verifies
     if (rank == 1) {
         for (int i = 0; i < N; ++i) {
-            EXPECT_EQ(recv_data[i], send_data[i]);
+            EXPECT_EQ(recv_data[uz(i)], send_data[uz(i)]);
         }
     }
 }
@@ -533,7 +536,7 @@ TEST_F(MPICommTest, SendRecvInt64) {
     // Only rank 1 verifies
     if (rank == 1) {
         for (int i = 0; i < N; ++i) {
-            EXPECT_EQ(recv_data[i], send_data[i]);
+            EXPECT_EQ(recv_data[uz(i)], send_data[uz(i)]);
         }
     }
 }
@@ -546,12 +549,12 @@ TEST_F(MPICommTest, BcastInt) {
     const int N = 100;
     std::vector<int> buf(N);
     if (rank == 0) {
-        for (int i = 0; i < N; ++i) buf[i] = i * 7 + 1;
+        for (int i = 0; i < N; ++i) buf[uz(i)] = i * 7 + 1;
     }
     auto req = comm->bcast(buf.data(), N, 0);
     req->wait();
     for (int i = 0; i < N; ++i) {
-        EXPECT_EQ(buf[i], i * 7 + 1) << "rank " << rank << " mismatch at " << i;
+        EXPECT_EQ(buf[uz(i)], i * 7 + 1) << "rank " << rank << " mismatch at " << i;
     }
 }
 
@@ -559,12 +562,12 @@ TEST_F(MPICommTest, BcastDouble) {
     const int N = 64;
     std::vector<double> buf(N);
     if (rank == 0) {
-        for (int i = 0; i < N; ++i) buf[i] = 1.5 * i;
+        for (int i = 0; i < N; ++i) buf[uz(i)] = 1.5 * i;
     }
     auto req = comm->bcast(buf.data(), N, 0);
     req->wait();
     for (int i = 0; i < N; ++i) {
-        EXPECT_DOUBLE_EQ(buf[i], 1.5 * i);
+        EXPECT_DOUBLE_EQ(buf[uz(i)], 1.5 * i);
     }
 }
 
@@ -575,12 +578,12 @@ TEST_F(MPICommTest, BcastFromNonRootZero) {
     const int root = size - 1;
     std::vector<int64_t> buf(N, -1);
     if (rank == root) {
-        for (int i = 0; i < N; ++i) buf[i] = i * 13;
+        for (int i = 0; i < N; ++i) buf[uz(i)] = i * 13;
     }
     auto req = comm->bcast(buf.data(), N, root);
     req->wait();
     for (int i = 0; i < N; ++i) {
-        EXPECT_EQ(buf[i], i * 13);
+        EXPECT_EQ(buf[uz(i)], i * 13);
     }
 }
 
@@ -639,11 +642,11 @@ TEST_F(MPICommTest, ExscanSumInt64) {
 }
 
 TEST_F(MPICommTest, ExscanSumUint64) {
-    const uint64_t my_value = 100ULL + rank;
+    const uint64_t my_value = uint64_t{100} + static_cast<uint64_t>(rank);
     uint64_t result = comm->exscan<uint64_t>(my_value, MPI_SUM);
     // exclusive prefix: sum_{k=0..r-1}(100 + k) = r*100 + r*(r-1)/2
-    const uint64_t expected = static_cast<uint64_t>(rank) * 100ULL
-                            + static_cast<uint64_t>(rank) * (rank - 1) / 2;
+    const uint64_t expected = static_cast<uint64_t>(rank) * uint64_t{100}
+                            + static_cast<uint64_t>(rank) * static_cast<uint64_t>(rank - 1) / 2;
     EXPECT_EQ(result, expected);
 }
 

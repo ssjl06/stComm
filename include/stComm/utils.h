@@ -1,6 +1,7 @@
 #pragma once
 
 #include <climits>
+#include <cstddef>
 #include <cstdint>
 #include <numeric>
 #include <stdexcept>
@@ -27,9 +28,10 @@ public:
     static std::vector<int> calculateDisplacements(const int* counts, int num_ranks) {
         // Accumulate in int64: an int running sum past INT_MAX is UB and
         // would hand MPI/NCCL a wrapped (negative) offset.
-        std::vector<int> displs(num_ranks);
+        const auto n = static_cast<std::size_t>(num_ranks);
+        std::vector<int> displs(n);
         std::int64_t offset = 0;
-        for (int i = 0; i < num_ranks; ++i) {
+        for (std::size_t i = 0; i < n; ++i) {
             if (offset > INT_MAX) {
                 throw std::overflow_error(
                     "stComm: displacement " + std::to_string(offset) +
@@ -45,7 +47,7 @@ public:
      * @brief Calculate displacements from counts (vector version)
      */
     static std::vector<int> calculateDisplacements(const std::vector<int>& counts) {
-        return calculateDisplacements(counts.data(), counts.size());
+        return calculateDisplacements(counts.data(), static_cast<int>(counts.size()));
     }
 
     /**

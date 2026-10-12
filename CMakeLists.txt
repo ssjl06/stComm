@@ -63,17 +63,18 @@ include_directories(
     ${NCCL_INCLUDE_DIR}
 )
 
-# Compiler flags
-set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Wall -Wextra")
-# On by default: the tree builds warning-free (Release and Debug). Directory-
-# scoped, so find_package consumers are not affected; turn off locally with
+# Compiler warnings: the strict set is attached per target (PRIVATE) by
+# enable_compiler_warnings(), so find_package consumers are not affected.
+# -Werror is on by default; turn off locally with
 # -DSTCOMM_WARNINGS_AS_ERRORS=OFF if a newer compiler adds a warning first.
+list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/cmake")
+include(enable_compiler_warnings)
 option(STCOMM_WARNINGS_AS_ERRORS "Treat compiler warnings as errors" ON)
-if(STCOMM_WARNINGS_AS_ERRORS)
-    add_compile_options("$<$<COMPILE_LANGUAGE:CXX>:-Werror>")
-endif()
-set(CMAKE_CXX_FLAGS_RELEASE "${CMAKE_CXX_FLAGS_RELEASE} -O3")
-set(CMAKE_CXX_FLAGS_DEBUG "${CMAKE_CXX_FLAGS_DEBUG} -g -O0")
+
+# Optimization: set outright rather than appended, so Release is exactly -O3
+# (CMake's default already carries -O3, which appending duplicated).
+set(CMAKE_CXX_FLAGS_RELEASE "-O3 -DNDEBUG")
+set(CMAKE_CXX_FLAGS_DEBUG "-g -O0")
 
 # Add subdirectories
 add_subdirectory(src/stComm)
