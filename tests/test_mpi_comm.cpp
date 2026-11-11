@@ -10,6 +10,7 @@
 #include <random>
 #include <algorithm>
 #include <climits>
+#include <cstddef>
 #include <cstdint>
 #include <cstring>
 #include <stdexcept>
@@ -519,6 +520,141 @@ TEST_F(MPICommTest, DroppedRequestStillCompletes) {
     std::int64_t out = -1;
     comm->exscan(std::int64_t{1}, &out);  // dropped: finalizer must not run
     EXPECT_EQ(out, -1);
+}
+
+// ============================================================================
+// size_t-count collectives (no INT_MAX limit; chunked point-to-point)
+// ============================================================================
+
+namespace {
+
+// Shrink the point-to-point chunk so tiny payloads span many messages — the
+// same code path a >1 GiB transfer takes. Every rank runs the same test, so
+// all use the same value.
+struct ChunkBytesGuard {
+    std::size_t saved;
+    explicit ChunkBytesGuard(std::size_t bytes) : saved(stComm::detail::p2pChunkBytes()) {
+        stComm::detail::p2pChunkBytes() = bytes;
+    }
+    ~ChunkBytesGuard() { stComm::detail::p2pChunkBytes() = saved; }
+};
+
+// Rank s sends rank r this many elements (0 for some pairs, on purpose).
+std::size_t pairCount(int s, int r) { return static_cast<std::size_t>((s * 3 + r * 5) % 7); }
+
+std::int64_t pairValue(int s, int r, std::size_t k) {
+    return static_cast<std::int64_t>(s) * 1000000 + r * 1000 + static_cast<std::int64_t>(k);
+}
+
+}  // namespace
+
+TEST_F(MPICommTest, AlltoallvSizeCountsChunked) {
+    // 12 B chunks under 8 B elements: chunk boundaries fall inside elements.
+    for (std::size_t chunk : {std::size_t{12}, std::size_t{1} << 30}) {
+        const ChunkBytesGuard guard(chunk);
+        std::vector<std::size_t> sendcounts(uz(size)), recvcounts(uz(size));
+        std::size_t total_send = 0, total_recv = 0;
+        for (int r = 0; r < size; ++r) {
+            sendcounts[uz(r)] = pairCount(rank, r);
+            recvcounts[uz(r)] = pairCount(r, rank);
+            total_send += sendcounts[uz(r)];
+            total_recv += recvcounts[uz(r)];
+        }
+        std::vector<std::int64_t> send(total_send), recv(total_recv, -1);
+        std::size_t at = 0;
+        for (int r = 0; r < size; ++r)
+            for (std::size_t k = 0; k < sendcounts[uz(r)]; ++k) send[at++] = pairValue(rank, r, k);
+
+        auto req = comm->alltoallv(send.data(), sendcounts.data(),
+                                   recv.data(), recvcounts.data());
+        if (chunk == 12) {
+            // One message per 12 B (rounded up) per non-empty pair, both ways.
+            std::size_t expected = 0;
+            for (int r = 0; r < size; ++r) {
+                if (r == rank) continue;
+                expected += (sendcounts[uz(r)] * 8 + 11) / 12;
+                expected += (recvcounts[uz(r)] * 8 + 11) / 12;
+            }
+            EXPECT_EQ(req->getHandles().size(), expected);
+        }
+        req->wait();
+
+        at = 0;
+        for (int s = 0; s < size; ++s)
+            for (std::size_t k = 0; k < recvcounts[uz(s)]; ++k)
+                EXPECT_EQ(recv[at++], pairValue(s, rank, k)) << "from " << s << " elem " << k;
+    }
+}
+
+TEST_F(MPICommTest, AllgathervSizeCountsChunked) {
+    const ChunkBytesGuard guard(20);
+    std::vector<std::size_t> recvcounts(uz(size));
+    std::size_t total = 0;
+    for (int r = 0; r < size; ++r) {
+        recvcounts[uz(r)] = static_cast<std::size_t>((r * 4) % 9);  // rank 0 sends nothing
+        total += recvcounts[uz(r)];
+    }
+    const std::size_t mine = recvcounts[uz(rank)];
+    std::vector<std::int64_t> send(mine), recv(total, -1);
+    for (std::size_t k = 0; k < mine; ++k) send[k] = pairValue(rank, 0, k);
+
+    comm->allgatherv(send.data(), mine, recv.data(), recvcounts.data())->wait();
+
+    std::size_t at = 0;
+    for (int r = 0; r < size; ++r)
+        for (std::size_t k = 0; k < recvcounts[uz(r)]; ++k)
+            EXPECT_EQ(recv[at++], pairValue(r, 0, k)) << "block " << r << " elem " << k;
+}
+
+// Several exchanges in flight at once, waited out of order, with ordinary
+// tagged send/recv traffic between the same ranks: the reserved tag and MPI's
+// per-pair ordering keep every chunk matched to its own exchange.
+TEST_F(MPICommTest, SizeCountExchangesOverlap) {
+    const ChunkBytesGuard guard(16);
+    const std::size_t per = 5;
+    std::vector<std::size_t> counts(uz(size), per);
+    std::vector<std::int64_t> sendA(uz(size) * per), sendB(uz(size) * per);
+    std::vector<std::int64_t> recvA(uz(size) * per, -1), recvB(uz(size) * per, -1);
+    for (int r = 0; r < size; ++r)
+        for (std::size_t k = 0; k < per; ++k) {
+            sendA[uz(r) * per + k] = pairValue(rank, r, k);
+            sendB[uz(r) * per + k] = -pairValue(rank, r, k) - 1;
+        }
+
+    auto reqA = comm->alltoallv(sendA.data(), counts.data(), recvA.data(), counts.data());
+    auto reqB = comm->alltoallv(sendB.data(), counts.data(), recvB.data(), counts.data());
+
+    // Ring message on the default tag while both exchanges are pending.
+    int token_out = rank, token_in = -1;
+    auto rreq = comm->recv(&token_in, 1, (rank + size - 1) % size);
+    auto sreq = comm->send(&token_out, 1, (rank + 1) % size);
+
+    reqB->wait();
+    sreq->wait();
+    rreq->wait();
+    reqA->wait();
+
+    EXPECT_EQ(token_in, (rank + size - 1) % size);
+    for (int s = 0; s < size; ++s)
+        for (std::size_t k = 0; k < per; ++k) {
+            EXPECT_EQ(recvA[uz(s) * per + k], pairValue(s, rank, k));
+            EXPECT_EQ(recvB[uz(s) * per + k], -pairValue(s, rank, k) - 1);
+        }
+}
+
+TEST_F(MPICommTest, SizeCountSelfMismatchThrows) {
+    // Every rank passes the same inconsistent self count, so all throw before
+    // any message is issued.
+    std::vector<std::size_t> sendcounts(uz(size), 0), recvcounts(uz(size), 0);
+    sendcounts[uz(rank)] = 2;
+    recvcounts[uz(rank)] = 3;
+    std::vector<int> buf(4, 0);
+    EXPECT_THROW(comm->alltoallv(buf.data(), sendcounts.data(),
+                                 buf.data(), recvcounts.data()),
+                 std::invalid_argument);
+    EXPECT_THROW(comm->allgatherv(buf.data(), std::size_t{2},
+                                  buf.data(), recvcounts.data()),
+                 std::invalid_argument);
 }
 
 TEST(UtilsTest, DisplacementOverflowThrows) {

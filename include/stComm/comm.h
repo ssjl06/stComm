@@ -128,6 +128,24 @@ public:
         else                                 return mpi_->alltoallv(sendbuf, sendcounts, recvbuf, recvcounts);
     }
 
+    // size_t-count variants — no INT_MAX limit on any count or total, on
+    // either Space (Host: 1 GiB point-to-point chunks; Device: NCCL's native
+    // size_t counts). Use these when a payload may not fit the int variants;
+    // every rank must use the same variant for a given exchange.
+    template<Space Sp, typename T>
+    RequestPtrFor<Sp> allgatherv(const T* sendbuf, std::size_t sendcount,
+                                 T* recvbuf, const std::size_t* recvcounts) {
+        if constexpr (Sp == Space::Device) { return device().allgatherv(sendbuf, sendcount, recvbuf, recvcounts); }
+        else                                 return mpi_->allgatherv(sendbuf, sendcount, recvbuf, recvcounts);
+    }
+
+    template<Space Sp, typename T>
+    RequestPtrFor<Sp> alltoallv(const T* sendbuf, const std::size_t* sendcounts,
+                                T* recvbuf, const std::size_t* recvcounts) {
+        if constexpr (Sp == Space::Device) { return device().alltoallv(sendbuf, sendcounts, recvbuf, recvcounts); }
+        else                                 return mpi_->alltoallv(sendbuf, sendcounts, recvbuf, recvcounts);
+    }
+
     // ---- Space-selecting reductions (async) -----------------------------
     // Like the collectives above, these return a request; the scalar result is
     // delivered to *out once it completes. Host uses MPI_Iallreduce/Iexscan;

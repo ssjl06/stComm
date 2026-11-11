@@ -9,7 +9,7 @@ stComm is a C++/CUDA library providing template-based asynchronous communication
 - **Template-Based API**: Support for all primitive types (int, float, double, etc.)
 - **Automatic Displacement Calculation**: No manual offset computation needed
 - **Asynchronous Operations**: Non-blocking communication with async/await pattern
-- **Large Data Support (>2GB)**: Automatic chunking for data transfers exceeding 2GB limit
+- **Large Data Support (>2GB)**: `send`/`recv`/`bcast` chunk automatically; `allgatherv`/`alltoallv` have `size_t`-count variants with no size limit (the `int`-count variants are limited to INT_MAX elements per side)
 - **Type-Safe**: Compile-time type checking with templates
 - **Transparent API**: Same interface for both small and large data transfers
 

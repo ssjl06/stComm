@@ -44,6 +44,23 @@ public:
     }
 
     /**
+     * @brief Widen int counts to size_t, rejecting negative ones.
+     */
+    static std::vector<std::size_t> toSizeCounts(const int* counts, int num_ranks) {
+        const auto n = static_cast<std::size_t>(num_ranks);
+        std::vector<std::size_t> out(n);
+        for (std::size_t i = 0; i < n; ++i) {
+            if (counts[i] < 0) {
+                throw std::overflow_error("stComm: negative count " +
+                                          std::to_string(counts[i]) + " for rank " +
+                                          std::to_string(i));
+            }
+            out[i] = static_cast<std::size_t>(counts[i]);
+        }
+        return out;
+    }
+
+    /**
      * @brief Calculate displacements from counts (vector version)
      */
     static std::vector<int> calculateDisplacements(const std::vector<int>& counts) {

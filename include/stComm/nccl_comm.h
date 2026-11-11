@@ -125,6 +125,17 @@ public:
     std::shared_ptr<NCCLRequest> alltoallv(const T* sendbuf, const int* sendcounts,
                         T* recvbuf, const int* recvcounts);
 
+    // size_t-count variants: no INT_MAX limit on a count or on a side's total
+    // (NCCL takes size_t counts; offsets are pointer arithmetic). The int
+    // versions above forward here.
+    template<typename T>
+    std::shared_ptr<NCCLRequest> allgatherv(const T* sendbuf, size_t sendcount,
+                         T* recvbuf, const size_t* recvcounts);
+
+    template<typename T>
+    std::shared_ptr<NCCLRequest> alltoallv(const T* sendbuf, const size_t* sendcounts,
+                        T* recvbuf, const size_t* recvcounts);
+
     // Broadcast `count` elements of T from `root` to all ranks (async,
     // device memory). In-place: `data` is both source on root and destination
     // on every rank. Issued on the internal CUDA stream; call .wait() to
@@ -233,38 +244,56 @@ std::shared_ptr<NCCLRequest> NCCLComm::recv(T* data, size_t count, int source) {
 template<typename T>
 std::shared_ptr<NCCLRequest> NCCLComm::allgatherv(const T* sendbuf, int sendcount,
                                 T* recvbuf, const int* recvcounts) {
+    if (sendcount < 0) {
+        throw std::overflow_error("stComm NCCL allgatherv: negative sendcount");
+    }
+    const auto counts = Utils::toSizeCounts(recvcounts, size_);
+    return allgatherv(sendbuf, static_cast<size_t>(sendcount), recvbuf, counts.data());
+}
+
+template<typename T>
+std::shared_ptr<NCCLRequest> NCCLComm::alltoallv(const T* sendbuf, const int* sendcounts,
+                               T* recvbuf, const int* recvcounts) {
+    const auto scounts = Utils::toSizeCounts(sendcounts, size_);
+    const auto rcounts = Utils::toSizeCounts(recvcounts, size_);
+    return alltoallv(sendbuf, scounts.data(), recvbuf, rcounts.data());
+}
+
+template<typename T>
+std::shared_ptr<NCCLRequest> NCCLComm::allgatherv(const T* sendbuf, size_t sendcount,
+                                T* recvbuf, const size_t* recvcounts) {
     requireSubmittable();
 
     auto req = std::make_shared<NCCLRequest>();
-
-    // Auto-calculate displacements
-    auto displs = Utils::calculateDisplacements(recvcounts, size_);
-
     ncclDataType_t nccl_type = NCCLTypeMap<T>::type();
+    const auto nranks = static_cast<size_t>(size_);
+    const auto me     = static_cast<size_t>(rank_);
 
-    // NCCL doesn't have native allgatherv, use grouped send/recv
+    // NCCL doesn't have native allgatherv, use grouped send/recv. Offsets are
+    // plain pointer arithmetic, so there is no int displacement limit.
     STCOMM_NCCL_CHECK(ncclGroupStart());
-    const auto nsend = static_cast<size_t>(sendcount);
-    for (int i = 0; i < size_; ++i) {
-        if (i == rank_) {
+    size_t offset = 0;  // in elements
+    for (size_t i = 0; i < nranks; ++i) {
+        T* dst = recvbuf + offset;
+        if (i == me) {
             // Broadcast my data to all others
-            for (int j = 0; j < size_; ++j) {
-                if (j != rank_) {
-                    STCOMM_NCCL_CHECK(ncclSend(sendbuf, nsend, nccl_type, j, comm_, stream_));
+            for (size_t j = 0; j < nranks; ++j) {
+                if (j != me) {
+                    STCOMM_NCCL_CHECK(ncclSend(sendbuf, sendcount, nccl_type,
+                                               static_cast<int>(j), comm_, stream_));
                 }
             }
             // Copy my own data
-            T* mine = recvbuf + displs[static_cast<size_t>(rank_)];
-            if (mine != sendbuf) {
-                STCOMM_CUDA_CHECK(cudaMemcpyAsync(mine, sendbuf, nsend * sizeof(T),
+            if (dst != sendbuf) {
+                STCOMM_CUDA_CHECK(cudaMemcpyAsync(dst, sendbuf, sendcount * sizeof(T),
                                                   cudaMemcpyDeviceToDevice, stream_));
             }
         } else {
             // Receive from rank i
-            STCOMM_NCCL_CHECK(ncclRecv(recvbuf + displs[static_cast<size_t>(i)],
-                                       static_cast<size_t>(recvcounts[i]),
-                                       nccl_type, i, comm_, stream_));
+            STCOMM_NCCL_CHECK(ncclRecv(dst, recvcounts[i], nccl_type,
+                                       static_cast<int>(i), comm_, stream_));
         }
+        offset += recvcounts[i];
     }
     STCOMM_NCCL_CHECK(ncclGroupEnd());
 
@@ -273,39 +302,40 @@ std::shared_ptr<NCCLRequest> NCCLComm::allgatherv(const T* sendbuf, int sendcoun
 }
 
 template<typename T>
-std::shared_ptr<NCCLRequest> NCCLComm::alltoallv(const T* sendbuf, const int* sendcounts,
-                               T* recvbuf, const int* recvcounts) {
+std::shared_ptr<NCCLRequest> NCCLComm::alltoallv(const T* sendbuf, const size_t* sendcounts,
+                               T* recvbuf, const size_t* recvcounts) {
     requireSubmittable();
 
     auto req = std::make_shared<NCCLRequest>();
-
-    // Auto-calculate displacements
-    auto sdispls = Utils::calculateDisplacements(sendcounts, size_);
-    auto rdispls = Utils::calculateDisplacements(recvcounts, size_);
-
     ncclDataType_t nccl_type = NCCLTypeMap<T>::type();
+    const auto nranks = static_cast<size_t>(size_);
+    const auto me     = static_cast<size_t>(rank_);
 
-    // NCCL doesn't have native alltoallv, use grouped send/recv
+    // NCCL doesn't have native alltoallv, use grouped send/recv. Offsets are
+    // plain pointer arithmetic, so there is no int displacement limit.
     STCOMM_NCCL_CHECK(ncclGroupStart());
-    for (int i = 0; i < size_; ++i) {
-        const auto ui = static_cast<size_t>(i);
-        const T* src = sendbuf + sdispls[ui];
-        T* dst = recvbuf + rdispls[ui];
-        if (i != rank_) {
+    size_t soff = 0, roff = 0;  // in elements
+    for (size_t i = 0; i < nranks; ++i) {
+        const T* src = sendbuf + soff;
+        T* dst = recvbuf + roff;
+        if (i != me) {
             if (sendcounts[i] > 0) {
-                STCOMM_NCCL_CHECK(ncclSend(src, static_cast<size_t>(sendcounts[i]), nccl_type, i, comm_, stream_));
+                STCOMM_NCCL_CHECK(ncclSend(src, sendcounts[i], nccl_type,
+                                           static_cast<int>(i), comm_, stream_));
             }
             if (recvcounts[i] > 0) {
-                STCOMM_NCCL_CHECK(ncclRecv(dst, static_cast<size_t>(recvcounts[i]), nccl_type, i, comm_, stream_));
+                STCOMM_NCCL_CHECK(ncclRecv(dst, recvcounts[i], nccl_type,
+                                           static_cast<int>(i), comm_, stream_));
             }
         } else {
             // Self-copy
             if (sendcounts[i] > 0 && dst != src) {
-                STCOMM_CUDA_CHECK(cudaMemcpyAsync(dst, src,
-                                                  static_cast<size_t>(sendcounts[i]) * sizeof(T),
+                STCOMM_CUDA_CHECK(cudaMemcpyAsync(dst, src, sendcounts[i] * sizeof(T),
                                                   cudaMemcpyDeviceToDevice, stream_));
             }
         }
+        soff += sendcounts[i];
+        roff += recvcounts[i];
     }
     STCOMM_NCCL_CHECK(ncclGroupEnd());
 

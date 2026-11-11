@@ -5,8 +5,11 @@
 #include "utils.h"
 #include "mpi_check.h"
 #include <mpi.h>
+#include <algorithm>
 #include <climits>
+#include <cstddef>
 #include <cstdint>
+#include <cstring>
 #include <memory>
 #include <stdexcept>
 #include <string>
@@ -139,6 +142,19 @@ inline ElemLayout elemLayout(const int* counts, int nranks, const char* op) {
     return l;
 }
 
+// Chunk size, in bytes, of the point-to-point messages behind the size_t-count
+// collectives. Every MPI count stays far below INT_MAX whatever the payload.
+// A reference so tests can shrink it to exercise multi-chunk transfers with
+// small data; every rank must use the same value.
+inline std::size_t& p2pChunkBytes() {
+    static std::size_t bytes = std::size_t{1} << 30;  // 1 GiB
+    return bytes;
+}
+
+// Tag reserved for that point-to-point traffic (within MPI's guaranteed tag
+// range). User send()/recv() must not use it.
+constexpr int kLargeCollectiveTag = 32765;
+
 } // namespace detail
 
 /**
@@ -179,7 +195,8 @@ public:
     // Collective communication - with auto displacement. Counts are int
     // elements; each side may total up to INT_MAX elements (not bytes), and a
     // layout past that throws std::overflow_error before any MPI call. Every
-    // rank must be given a layout that fits, or the collective desynchronises.
+    // rank must be given a layout that fits, or the collective desynchronises
+    // — for payloads that may not fit, use the size_t variants below.
     template<typename T>
     std::shared_ptr<MPIRequest> allgatherv(const T* sendbuf, int sendcount,
                          T* recvbuf, const int* recvcounts);
@@ -187,6 +204,24 @@ public:
     template<typename T>
     std::shared_ptr<MPIRequest> alltoallv(const T* sendbuf, const int* sendcounts,
                         T* recvbuf, const int* recvcounts);
+
+    // Unlimited-size variants: size_t counts, no INT_MAX limit of any kind
+    // (per pair, per rank or in total). The payload travels as point-to-point
+    // messages chunked at 1 GiB — each pair's count is known to both ends, so
+    // no rank has to learn anything about the others' layouts, and submission
+    // stays fully non-blocking. Same contract as the int versions otherwise:
+    // every rank calls together, auto displacement, and this rank's send count
+    // to itself must equal its receive count from itself.
+    //
+    // A given exchange must use the SAME variant on every rank — the int
+    // versions are MPI collectives and do not interoperate with these.
+    template<typename T>
+    std::shared_ptr<MPIRequest> allgatherv(const T* sendbuf, std::size_t sendcount,
+                         T* recvbuf, const std::size_t* recvcounts);
+
+    template<typename T>
+    std::shared_ptr<MPIRequest> alltoallv(const T* sendbuf, const std::size_t* sendcounts,
+                        T* recvbuf, const std::size_t* recvcounts);
 
     // Broadcast `count` elements of T from `root` to all ranks (async).
     // Automatically handles large data (>2GB) by chunking.
@@ -231,6 +266,12 @@ public:
     MPI_Comm getHandle() const { return comm_; }
 
 private:
+    // Issue `nbytes` to/from one peer as a run of chunked non-blocking
+    // messages, all tracked by `req`. Callers skip empty transfers (both ends
+    // know the count), so at least one message is always issued.
+    void isendBytes(MPIRequest& req, const void* data, std::size_t nbytes, int dest);
+    void irecvBytes(MPIRequest& req, void* data, std::size_t nbytes, int source);
+
     MPI_Comm comm_;
     int rank_;
     int size_;
@@ -346,6 +387,110 @@ std::shared_ptr<MPIRequest> MPIComm::alltoallv(const T* sendbuf, const int* send
                    comm_, &req->getHandle()));
     req->setScratch(layouts);  // arrays must outlive the non-blocking call
 
+    return req;
+}
+
+inline void MPIComm::isendBytes(MPIRequest& req, const void* data, std::size_t nbytes,
+                                int dest) {
+    const std::size_t chunk_max =
+        std::min(detail::p2pChunkBytes(), static_cast<std::size_t>(INT_MAX));
+    const char* bytes = static_cast<const char*>(data);
+    for (std::size_t off = 0; off < nbytes;) {
+        const std::size_t chunk = std::min(chunk_max, nbytes - off);
+        STCOMM_MPI_CHECK(MPI_Isend(bytes + off, static_cast<int>(chunk), MPI_BYTE, dest,
+                                   detail::kLargeCollectiveTag, comm_, &req.addHandle()));
+        off += chunk;
+    }
+}
+
+inline void MPIComm::irecvBytes(MPIRequest& req, void* data, std::size_t nbytes,
+                                int source) {
+    const std::size_t chunk_max =
+        std::min(detail::p2pChunkBytes(), static_cast<std::size_t>(INT_MAX));
+    char* bytes = static_cast<char*>(data);
+    for (std::size_t off = 0; off < nbytes;) {
+        const std::size_t chunk = std::min(chunk_max, nbytes - off);
+        STCOMM_MPI_CHECK(MPI_Irecv(bytes + off, static_cast<int>(chunk), MPI_BYTE, source,
+                                   detail::kLargeCollectiveTag, comm_, &req.addHandle()));
+        off += chunk;
+    }
+}
+
+template<typename T>
+std::shared_ptr<MPIRequest> MPIComm::allgatherv(const T* sendbuf, std::size_t sendcount,
+                               T* recvbuf, const std::size_t* recvcounts) {
+    static_assert(std::is_trivially_copyable<T>::value,
+                  "Type must be trivially copyable for MPI communication");
+
+    const auto nranks = static_cast<std::size_t>(size_);
+    const auto me     = static_cast<std::size_t>(rank_);
+    if (recvcounts[me] != sendcount) {
+        throw std::invalid_argument(
+            "stComm MPI allgatherv: this rank sends " + std::to_string(sendcount) +
+            " elements but expects " + std::to_string(recvcounts[me]) + " from itself");
+    }
+
+    auto req = std::make_shared<MPIRequest>();
+    // Receives are posted before any send so no chunk ever waits unexpected.
+    T* mine = nullptr;
+    std::size_t offset = 0;  // in elements
+    for (std::size_t r = 0; r < nranks; ++r) {
+        T* dst = recvbuf + offset;
+        if (r == me) {
+            mine = dst;
+        } else if (recvcounts[r] > 0) {
+            irecvBytes(*req, dst, recvcounts[r] * sizeof(T), static_cast<int>(r));
+        }
+        offset += recvcounts[r];
+    }
+    if (sendcount > 0) {
+        for (std::size_t r = 0; r < nranks; ++r) {
+            if (r != me) isendBytes(*req, sendbuf, sendcount * sizeof(T), static_cast<int>(r));
+        }
+        if (mine != sendbuf) std::memmove(mine, sendbuf, sendcount * sizeof(T));
+    }
+    return req;
+}
+
+template<typename T>
+std::shared_ptr<MPIRequest> MPIComm::alltoallv(const T* sendbuf, const std::size_t* sendcounts,
+                              T* recvbuf, const std::size_t* recvcounts) {
+    static_assert(std::is_trivially_copyable<T>::value,
+                  "Type must be trivially copyable for MPI communication");
+
+    const auto nranks = static_cast<std::size_t>(size_);
+    const auto me     = static_cast<std::size_t>(rank_);
+    if (sendcounts[me] != recvcounts[me]) {
+        throw std::invalid_argument(
+            "stComm MPI alltoallv: this rank sends itself " + std::to_string(sendcounts[me]) +
+            " elements but expects " + std::to_string(recvcounts[me]));
+    }
+
+    auto req = std::make_shared<MPIRequest>();
+    // Receives are posted before any send so no chunk ever waits unexpected.
+    T* self_dst = nullptr;
+    std::size_t offset = 0;  // in elements
+    for (std::size_t r = 0; r < nranks; ++r) {
+        T* dst = recvbuf + offset;
+        if (r == me) {
+            self_dst = dst;
+        } else if (recvcounts[r] > 0) {
+            irecvBytes(*req, dst, recvcounts[r] * sizeof(T), static_cast<int>(r));
+        }
+        offset += recvcounts[r];
+    }
+    offset = 0;
+    for (std::size_t r = 0; r < nranks; ++r) {
+        const T* src = sendbuf + offset;
+        if (r == me) {
+            if (sendcounts[r] > 0 && self_dst != src) {
+                std::memmove(self_dst, src, sendcounts[r] * sizeof(T));
+            }
+        } else if (sendcounts[r] > 0) {
+            isendBytes(*req, src, sendcounts[r] * sizeof(T), static_cast<int>(r));
+        }
+        offset += sendcounts[r];
+    }
     return req;
 }
 
