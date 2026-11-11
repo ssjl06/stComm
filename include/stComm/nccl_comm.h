@@ -44,17 +44,20 @@ inline ncclRedOp_t to_nccl_op(ReduceOp op) {
 
 /**
  * @brief NCCL datatype mapper for primitive types
+ *
+ * Unmapped types are a compile error (deleted primary), like
+ * detail::mpi_datatype. NCCL has no 16-bit datatype, so int16_t/uint16_t are
+ * deliberately not mapped: sending them as a 32-bit type would move 4 bytes per
+ * 2-byte element and overrun the buffer.
  */
 template<typename T>
 struct NCCLTypeMap {
-    static ncclDataType_t type();
+    static ncclDataType_t type() = delete;
 };
 
 // Specializations for fixed-size types
 template<> inline ncclDataType_t NCCLTypeMap<int8_t>::type() { return ncclInt8; }
 template<> inline ncclDataType_t NCCLTypeMap<uint8_t>::type() { return ncclUint8; }
-template<> inline ncclDataType_t NCCLTypeMap<int16_t>::type() { return ncclInt32; }  // NCCL doesn't have int16, use int32
-template<> inline ncclDataType_t NCCLTypeMap<uint16_t>::type() { return ncclUint32; }  // NCCL doesn't have uint16, use uint32
 template<> inline ncclDataType_t NCCLTypeMap<int32_t>::type() { return ncclInt32; }
 template<> inline ncclDataType_t NCCLTypeMap<uint32_t>::type() { return ncclUint32; }
 template<> inline ncclDataType_t NCCLTypeMap<int64_t>::type() { return ncclInt64; }

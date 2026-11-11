@@ -358,6 +358,10 @@ All trivially copyable types:
 - `float`, `double`
 - Any other trivially copyable struct
 
+Device (NCCL) operations accept only the element types NCCL itself has:
+8/32/64-bit integers, `float` and `double`. `int16_t`/`uint16_t` (and structs)
+are host-only — using them with `Space::Device` is a compile error.
+
 ## License
 
 This project is provided as-is for educational and research purposes.
