@@ -15,6 +15,7 @@
 #include "stComm/stComm.h"
 #include "test_util.h"
 #include <cuda_runtime.h>
+#include <cstddef>
 #include <cstdint>
 #include <vector>
 #include <type_traits>
@@ -247,4 +248,84 @@ TEST_F(CommFacadeTest, AllreduceDevice) {
 
     cudaFree(dsend);
     cudaFree(drecv);
+}
+
+// A Device-space call on a host-only Comm must throw (it used to be an assert,
+// i.e. a null dereference in release builds).
+TEST_F(CommFacadeTest, DeviceCallOnHostOnlyCommThrows) {
+    Comm comm;
+    ASSERT_FALSE(comm.hasDevice());
+    int* buf = nullptr;
+    EXPECT_THROW(comm.nccl(), std::logic_error);
+    EXPECT_THROW(comm.bcast<Space::Device>(buf, 1, 0), std::logic_error);
+    EXPECT_THROW(comm.allreduce<Space::Device>(buf, buf, 1), std::logic_error);
+}
+
+// In-place allreduce is part of the facade contract on both Spaces.
+TEST_F(CommFacadeTest, AllreduceInPlaceHost) {
+    Comm comm;
+    std::vector<long> buf{static_cast<long>(rank), static_cast<long>(rank) + 1};
+    comm.allreduce<Space::Host>(buf.data(), buf.data(), buf.size(), ReduceOp::Max)->wait();
+    EXPECT_EQ(buf[0], static_cast<long>(size - 1));
+    EXPECT_EQ(buf[1], static_cast<long>(size));
+}
+
+// size_t-count variants route by Space like the int ones.
+TEST_F(CommFacadeTest, SizeCountCollectivesHost) {
+    Comm comm;
+    const std::size_t per = 3;
+    std::vector<std::size_t> counts(uz(size), per);
+    std::vector<int> send(uz(size) * per), recv(uz(size) * per, -1);
+    for (int j = 0; j < size; ++j)
+        for (std::size_t k = 0; k < per; ++k)
+            send[uz(j) * per + k] = rank * 100 + j * 10 + static_cast<int>(k);
+
+    auto req = comm.alltoallv<Space::Host>(send.data(), counts.data(),
+                                           recv.data(), counts.data());
+    static_assert(std::is_same_v<decltype(req), stComm::MPIRequestPtr>);
+    req->wait();
+    for (int i = 0; i < size; ++i)
+        for (std::size_t k = 0; k < per; ++k)
+            EXPECT_EQ(recv[uz(i) * per + k], i * 100 + rank * 10 + static_cast<int>(k));
+
+    std::vector<int> mine(per, rank), all(uz(size) * per, -1);
+    comm.allgatherv<Space::Host>(mine.data(), per, all.data(), counts.data())->wait();
+    for (int i = 0; i < size; ++i)
+        for (std::size_t k = 0; k < per; ++k) EXPECT_EQ(all[uz(i) * per + k], i);
+}
+
+TEST_F(CommFacadeTest, SizeCountCollectivesDevice) {
+    if (!deviceUsable())
+        GTEST_SKIP() << "needs " << size << " GPUs, have " << num_gpus;
+
+    Comm comm = Comm::onDevice(rank);
+    cudaSetDevice(rank);
+
+    const std::size_t per = 4;
+    const std::size_t n = uz(size) * per;
+    std::vector<std::size_t> counts(uz(size), per);
+    std::vector<std::int64_t> h_send(n), h_recv(n, -1);
+    for (int j = 0; j < size; ++j)
+        for (std::size_t k = 0; k < per; ++k)
+            h_send[uz(j) * per + k] = rank * 100 + j * 10 + static_cast<std::int64_t>(k);
+
+    std::int64_t *d_send = nullptr, *d_recv = nullptr;
+    ASSERT_EQ(cudaMalloc(&d_send, n * sizeof(std::int64_t)), cudaSuccess);
+    ASSERT_EQ(cudaMalloc(&d_recv, n * sizeof(std::int64_t)), cudaSuccess);
+    cudaMemcpy(d_send, h_send.data(), n * sizeof(std::int64_t), cudaMemcpyHostToDevice);
+
+    comm.alltoallv<Space::Device>(d_send, counts.data(), d_recv, counts.data())->wait();
+    cudaMemcpy(h_recv.data(), d_recv, n * sizeof(std::int64_t), cudaMemcpyDeviceToHost);
+    for (int i = 0; i < size; ++i)
+        for (std::size_t k = 0; k < per; ++k)
+            EXPECT_EQ(h_recv[uz(i) * per + k], i * 100 + rank * 10 + static_cast<std::int64_t>(k));
+
+    comm.allgatherv<Space::Device>(d_send, per, d_recv, counts.data())->wait();
+    cudaMemcpy(h_recv.data(), d_recv, n * sizeof(std::int64_t), cudaMemcpyDeviceToHost);
+    for (int i = 0; i < size; ++i)
+        for (std::size_t k = 0; k < per; ++k)
+            EXPECT_EQ(h_recv[uz(i) * per + k], i * 100 + static_cast<std::int64_t>(k));
+
+    cudaFree(d_send);
+    cudaFree(d_recv);
 }

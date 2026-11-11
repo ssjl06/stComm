@@ -9,7 +9,7 @@ stComm is a C++/CUDA library providing template-based asynchronous communication
 - **Template-Based API**: Support for all primitive types (int, float, double, etc.)
 - **Automatic Displacement Calculation**: No manual offset computation needed
 - **Asynchronous Operations**: Non-blocking communication with async/await pattern
-- **Large Data Support (>2GB)**: Automatic chunking for data transfers exceeding 2GB limit
+- **Large Data Support (>2GB)**: `send`/`recv`/`bcast` chunk automatically; `allgatherv`/`alltoallv` have `size_t`-count variants with no size limit (the `int`-count variants are limited to INT_MAX elements per side)
 - **Type-Safe**: Compile-time type checking with templates
 - **Transparent API**: Same interface for both small and large data transfers
 
@@ -357,6 +357,10 @@ All trivially copyable types:
 - `unsigned char`, `uint8_t`, `uint16_t`, `uint32_t`, `uint64_t`
 - `float`, `double`
 - Any other trivially copyable struct
+
+Device (NCCL) operations accept only the element types NCCL itself has:
+8/32/64-bit integers, `float` and `double`. `int16_t`/`uint16_t` (and structs)
+are host-only — using them with `Space::Device` is a compile error.
 
 ## License
 

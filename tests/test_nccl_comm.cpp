@@ -675,3 +675,44 @@ TEST(NCCLAbortState, PollWaitThrowsInsteadOfSpinning) {
                                               &state, "test"),
                  std::runtime_error);
 }
+
+// A request whose group never reached the stream must not report success.
+TEST(NCCLAbortState, FailedRequestThrowsOnWaitAndTest) {
+    if (!haveGpu()) GTEST_SKIP() << "needs a GPU";
+    bool finalized = false;
+    stComm::NCCLRequest r;
+    r.setFinalizer([&finalized] { finalized = true; });
+    r.fail("group flush failed");
+
+    EXPECT_THROW(r.wait(), std::runtime_error);
+    EXPECT_THROW(r.test(), std::runtime_error);
+    EXPECT_EQ(r.getStatus(), stComm::Status::ERROR);
+    EXPECT_FALSE(finalized);
+}
+
+// Using a communicator before initialize() is a caller bug: it must throw, not
+// hand back a null request for the caller to dereference.
+TEST(NCCLUninitialized, SubmissionThrows) {
+    stComm::NCCLComm c;
+    int* buf = nullptr;
+    std::pair<int, int> out;
+    EXPECT_THROW(c.bcast(buf, 1, 0), std::logic_error);
+    EXPECT_THROW(c.allreduce(buf, buf, 1), std::logic_error);
+    EXPECT_THROW(c.allreduceMaxloc(1, &out), std::logic_error);
+}
+
+// The emulated reductions cannot run inside a user group (their gather would be
+// deferred past the copy that reads its result).
+TEST_F(NCCLCommTest, EmulatedReductionsRejectedInsideGroup) {
+    std::pair<std::int64_t, int> hi{0, -1};
+    std::int64_t scan = -1;
+    nccl_comm->groupStart();
+    EXPECT_THROW(nccl_comm->allreduceMaxloc(std::int64_t{1}, &hi), std::logic_error);
+    EXPECT_THROW(nccl_comm->exscan(std::int64_t{1}, &scan), std::logic_error);
+    nccl_comm->groupEnd();
+
+    // ...and work normally again once the group is closed.
+    nccl_comm->allreduceMaxloc(static_cast<std::int64_t>(rank), &hi)->wait();
+    EXPECT_EQ(hi.first, size - 1);
+    EXPECT_EQ(hi.second, size - 1);
+}

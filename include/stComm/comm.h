@@ -3,9 +3,9 @@
 #include "mpi_comm.h"
 #include "nccl_comm.h"
 
-#include <cassert>
 #include <cstddef>
 #include <memory>
+#include <stdexcept>
 #include <type_traits>
 #include <utility>
 
@@ -110,21 +110,39 @@ public:
     // up with whichever backend handled it.
     template<Space Sp, typename T>
     RequestPtrFor<Sp> bcast(T* data, std::size_t count, int root) {
-        if constexpr (Sp == Space::Device) { assert(nccl_); return nccl_->bcast(data, count, root); }
+        if constexpr (Sp == Space::Device) { return device().bcast(data, count, root); }
         else                                 return mpi_->bcast(data, count, root);
     }
 
     template<Space Sp, typename T>
     RequestPtrFor<Sp> allgatherv(const T* sendbuf, int sendcount,
                                  T* recvbuf, const int* recvcounts) {
-        if constexpr (Sp == Space::Device) { assert(nccl_); return nccl_->allgatherv(sendbuf, sendcount, recvbuf, recvcounts); }
+        if constexpr (Sp == Space::Device) { return device().allgatherv(sendbuf, sendcount, recvbuf, recvcounts); }
         else                                 return mpi_->allgatherv(sendbuf, sendcount, recvbuf, recvcounts);
     }
 
     template<Space Sp, typename T>
     RequestPtrFor<Sp> alltoallv(const T* sendbuf, const int* sendcounts,
                                 T* recvbuf, const int* recvcounts) {
-        if constexpr (Sp == Space::Device) { assert(nccl_); return nccl_->alltoallv(sendbuf, sendcounts, recvbuf, recvcounts); }
+        if constexpr (Sp == Space::Device) { return device().alltoallv(sendbuf, sendcounts, recvbuf, recvcounts); }
+        else                                 return mpi_->alltoallv(sendbuf, sendcounts, recvbuf, recvcounts);
+    }
+
+    // size_t-count variants — no INT_MAX limit on any count or total, on
+    // either Space (Host: 1 GiB point-to-point chunks; Device: NCCL's native
+    // size_t counts). Use these when a payload may not fit the int variants;
+    // every rank must use the same variant for a given exchange.
+    template<Space Sp, typename T>
+    RequestPtrFor<Sp> allgatherv(const T* sendbuf, std::size_t sendcount,
+                                 T* recvbuf, const std::size_t* recvcounts) {
+        if constexpr (Sp == Space::Device) { return device().allgatherv(sendbuf, sendcount, recvbuf, recvcounts); }
+        else                                 return mpi_->allgatherv(sendbuf, sendcount, recvbuf, recvcounts);
+    }
+
+    template<Space Sp, typename T>
+    RequestPtrFor<Sp> alltoallv(const T* sendbuf, const std::size_t* sendcounts,
+                                T* recvbuf, const std::size_t* recvcounts) {
+        if constexpr (Sp == Space::Device) { return device().alltoallv(sendbuf, sendcounts, recvbuf, recvcounts); }
         else                                 return mpi_->alltoallv(sendbuf, sendcounts, recvbuf, recvcounts);
     }
 
@@ -135,24 +153,24 @@ public:
     // MAXLOC/scan). ReduceOp is mapped to the MPI op on the host path.
     template<Space Sp, typename T>
     RequestPtrFor<Sp> allreduceMaxloc(T value, std::pair<T, int>* out) {
-        if constexpr (Sp == Space::Device) { assert(nccl_); return nccl_->allreduceMaxloc(value, out); }
+        if constexpr (Sp == Space::Device) { return device().allreduceMaxloc(value, out); }
         else                                 return mpi_->allreduceMaxloc(value, out);
     }
 
     template<Space Sp, typename T>
     RequestPtrFor<Sp> exscan(T value, T* out, ReduceOp op = ReduceOp::Sum) {
-        if constexpr (Sp == Space::Device) { assert(nccl_); return nccl_->exscan(value, out, op); }
+        if constexpr (Sp == Space::Device) { return device().exscan(value, out, op); }
         else                                 return mpi_->exscan(value, out, detail::to_mpi_op(op));
     }
 
     // Element-wise allreduce over `count` values of T: recvbuf receives the
     // reduction (op) of every rank's sendbuf. Host maps ReduceOp to the MPI op
-    // (MPI_Iallreduce); Device is native ncclAllReduce — no host staging,
-    // in-place allowed (sendbuf == recvbuf).
+    // (MPI_Iallreduce); Device is native ncclAllReduce — no host staging.
+    // In-place is allowed on both (sendbuf == recvbuf).
     template<Space Sp, typename T>
     RequestPtrFor<Sp> allreduce(const T* sendbuf, T* recvbuf, std::size_t count,
                                 ReduceOp op = ReduceOp::Sum) {
-        if constexpr (Sp == Space::Device) { assert(nccl_); return nccl_->allreduce(sendbuf, recvbuf, count, op); }
+        if constexpr (Sp == Space::Device) { return device().allreduce(sendbuf, recvbuf, count, op); }
         else                                 return mpi_->allreduce(sendbuf, recvbuf, count, detail::to_mpi_op(op));
     }
 
@@ -160,9 +178,18 @@ public:
     // Advanced callers reach MPI/NCCL specifics (native handles, streams,
     // groups) through the backend object itself; Comm stays backend-agnostic.
     MPIComm&  mpi()  { return *mpi_; }
-    NCCLComm& nccl() { assert(nccl_); return *nccl_; }
+    NCCLComm& nccl() { return device(); }
 
 private:
+    // The device backend, or a throw: a Device-space call on a host-only Comm
+    // is a caller bug, and an assert would vanish in release builds and leave
+    // a null dereference.
+    NCCLComm& device() {
+        if (NCCLComm* p = nccl_.get()) return *p;
+        throw std::logic_error("stComm::Comm: Space::Device operation on a host-only "
+                               "Comm (construct it with Comm::onDevice)");
+    }
+
     // onDevice() only. Private so it can't be confused with the host ctor — note
     // MPICH types MPI_Comm as int, making Comm(MPI_Comm, int) ambiguous with a
     // hypothetical public two-arg overload.
