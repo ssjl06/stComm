@@ -11,6 +11,7 @@
 #include <chrono>
 #include <cstdint>
 #include <cstdlib>
+#include <exception>
 #include <functional>
 #include <memory>
 #include <stdexcept>
@@ -56,10 +57,38 @@ protected:
  * one MPI_Waitall. May additionally hold scratch storage and a finalizer; async
  * reductions use these to keep internal buffers alive and to deliver the scalar
  * result on completion.
+ *
+ * Dropping a request that has not completed: MPI is still using the scratch
+ * arrays (and the caller's buffers), and a non-blocking collective can neither
+ * be cancelled nor freed. So the destructor waits for it — the caller's buffers
+ * must stay valid until the request is gone, as with any non-blocking MPI call.
+ * The one exception is stack unwinding: blocking there could hang a rank that
+ * is trying to report an error, so the scratch is leaked instead (MPI may keep
+ * using it safely) and the exception carries on.
  */
 class MPIRequest : public Request {
 public:
     MPIRequest() : status_(Status::PENDING) {}
+
+    ~MPIRequest() override {
+        if (status_ == Status::SUCCESS || handles_.empty()) return;
+        int initialized = 0, finalized = 0;
+        MPI_Initialized(&initialized);
+        MPI_Finalized(&finalized);
+        if (!initialized || finalized) return;
+        if (std::uncaught_exceptions() > 0) {
+            // Deliberate leak: keeps the arrays MPI may still read alive.
+            (void)new std::shared_ptr<void>(std::move(scratch_));
+            return;
+        }
+        // Destructors must not throw, so the result is ignored. The finalizer
+        // is not run: nobody is left to read the result it would deliver.
+        (void)MPI_Waitall(static_cast<int>(handles_.size()), handles_.data(),
+                          MPI_STATUSES_IGNORE);
+    }
+
+    MPIRequest(const MPIRequest&)            = delete;
+    MPIRequest& operator=(const MPIRequest&) = delete;
 
     /// @brief Reserve a fresh MPI_Request slot to pass to a non-blocking call.
     MPI_Request& addHandle() {
@@ -218,7 +247,8 @@ void ncclPollWait(Query query, NCCLCommState* state, const char* what) {
  * record(stream, state). Until record() runs the request is "not yet recorded" and
  * wait()/test() complete immediately — this is what lets a request issued
  * inside a user groupStart()/groupEnd() defer its event to groupEnd(), where
- * the ops are actually flushed to the stream.
+ * the ops are actually flushed to the stream. If that flush fails, NCCLComm
+ * calls fail() instead and every later wait()/test() throws.
  */
 class NCCLRequest : public Request {
 public:
@@ -246,6 +276,15 @@ public:
         recorded_ = true;
     }
 
+    /// @brief Mark the request as never enqueued (its group failed to flush).
+    /// wait()/test() then throw instead of reporting success for work that
+    /// never ran; the finalizer is dropped.
+    void fail(std::string why) {
+        status_ = Status::ERROR;
+        error_  = std::move(why);
+        finalizer_ = nullptr;
+    }
+
     /// @brief Keep internal buffers alive until the operation completes.
     void setScratch(std::shared_ptr<void> scratch) { scratch_ = std::move(scratch); }
 
@@ -254,6 +293,7 @@ public:
 
     void wait() override {
         if (status_ == Status::SUCCESS) return;  // completed before any abort
+        throwIfFailed();
         if (recorded_) {
             detail::ncclPollWait([this] { return cudaEventQuery(event_); },
                                  state_.get(), "wait");
@@ -263,6 +303,7 @@ public:
 
     bool test() override {
         if (status_ == Status::SUCCESS) return true;  // completed before any abort
+        throwIfFailed();
         if (recorded_) {
             detail::throwIfAborted(state_.get(), "test");
             cudaError_t err = cudaEventQuery(event_);
@@ -293,12 +334,19 @@ public:
     cudaStream_t getStream() const { return stream_; }
 
 private:
+    void throwIfFailed() const {
+        if (status_ == Status::ERROR) {
+            throw std::runtime_error("stComm NCCL: request was never issued: " + error_);
+        }
+    }
+
     void complete() {
         if (status_ == Status::SUCCESS) return;
         status_ = Status::SUCCESS;
         if (finalizer_) finalizer_();
     }
 
+    std::string           error_;
     cudaStream_t          stream_ = nullptr;
     cudaEvent_t           event_  = nullptr;
     std::shared_ptr<detail::NCCLCommState> state_;

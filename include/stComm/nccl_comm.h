@@ -8,6 +8,8 @@
 #include <nccl.h>
 #include <cuda_runtime.h>
 #include <memory>
+#include <stdexcept>
+#include <string>
 #include <utility>
 #include <vector>
 
@@ -64,6 +66,10 @@ template<> inline ncclDataType_t NCCLTypeMap<int64_t>::type() { return ncclInt64
 template<> inline ncclDataType_t NCCLTypeMap<uint64_t>::type() { return ncclUint64; }
 template<> inline ncclDataType_t NCCLTypeMap<float>::type() { return ncclFloat32; }
 template<> inline ncclDataType_t NCCLTypeMap<double>::type() { return ncclFloat64; }
+
+namespace detail {
+template<typename T> struct GatherScratch;
+}  // namespace detail
 
 /**
  * @brief NCCL-based communication backend for GPU
@@ -131,7 +137,9 @@ public:
     // exact). Async: the scalar result lands in *out once the returned request
     // completes; the gather buffers live inside the request until then. Same
     // shape as MPIComm's async reduction overloads, so the Comm facade routes
-    // both by Space tag.
+    // both by Space tag. Not usable inside groupStart()/groupEnd() (the gather
+    // would be deferred past the copy that reads its result) — throws
+    // std::logic_error there.
     template<typename T>
     std::shared_ptr<NCCLRequest> allreduceMaxloc(T value, std::pair<T, int>* out);
 
@@ -156,6 +164,20 @@ public:
     cudaStream_t getStream() const { return stream_; }
 
 private:
+    // Every submission starts here: using the communicator before
+    // initialize() is a caller bug, and an aborted one accepts no more work.
+    void requireSubmittable() const {
+        if (!initialized_) {
+            throw std::logic_error("stComm NCCL: communicator used before initialize()");
+        }
+        detail::throwIfAborted(state_.get(), "submit");
+    }
+
+    // Shared front half of the emulated reductions: gather every rank's
+    // `value` into the returned scratch's host buffer, on the stream.
+    template<typename T>
+    std::shared_ptr<detail::GatherScratch<T>> enqueueGather(T value, const char* what);
+
     // Record the request's completion event now, or — if we are inside a user
     // groupStart()/groupEnd() — defer it to groupEnd(), since the ops are not
     // actually on the stream until the group is flushed.
@@ -184,10 +206,7 @@ private:
 
 template<typename T>
 std::shared_ptr<NCCLRequest> NCCLComm::send(const T* data, size_t count, int dest) {
-    if (!initialized_) {
-        return nullptr;
-    }
-    detail::throwIfAborted(state_.get(), "submit");
+    requireSubmittable();
 
     auto req = std::make_shared<NCCLRequest>();
 
@@ -200,10 +219,7 @@ std::shared_ptr<NCCLRequest> NCCLComm::send(const T* data, size_t count, int des
 
 template<typename T>
 std::shared_ptr<NCCLRequest> NCCLComm::recv(T* data, size_t count, int source) {
-    if (!initialized_) {
-        return nullptr;
-    }
-    detail::throwIfAborted(state_.get(), "submit");
+    requireSubmittable();
 
     auto req = std::make_shared<NCCLRequest>();
 
@@ -217,10 +233,7 @@ std::shared_ptr<NCCLRequest> NCCLComm::recv(T* data, size_t count, int source) {
 template<typename T>
 std::shared_ptr<NCCLRequest> NCCLComm::allgatherv(const T* sendbuf, int sendcount,
                                 T* recvbuf, const int* recvcounts) {
-    if (!initialized_) {
-        return nullptr;
-    }
-    detail::throwIfAborted(state_.get(), "submit");
+    requireSubmittable();
 
     auto req = std::make_shared<NCCLRequest>();
 
@@ -262,10 +275,7 @@ std::shared_ptr<NCCLRequest> NCCLComm::allgatherv(const T* sendbuf, int sendcoun
 template<typename T>
 std::shared_ptr<NCCLRequest> NCCLComm::alltoallv(const T* sendbuf, const int* sendcounts,
                                T* recvbuf, const int* recvcounts) {
-    if (!initialized_) {
-        return nullptr;
-    }
-    detail::throwIfAborted(state_.get(), "submit");
+    requireSubmittable();
 
     auto req = std::make_shared<NCCLRequest>();
 
@@ -305,10 +315,7 @@ std::shared_ptr<NCCLRequest> NCCLComm::alltoallv(const T* sendbuf, const int* se
 
 template<typename T>
 std::shared_ptr<NCCLRequest> NCCLComm::bcast(T* data, size_t count, int root) {
-    if (!initialized_) {
-        return nullptr;
-    }
-    detail::throwIfAborted(state_.get(), "submit");
+    requireSubmittable();
 
     auto req = std::make_shared<NCCLRequest>();
 
@@ -322,10 +329,7 @@ std::shared_ptr<NCCLRequest> NCCLComm::bcast(T* data, size_t count, int root) {
 template<typename T>
 std::shared_ptr<NCCLRequest> NCCLComm::allreduce(const T* sendbuf, T* recvbuf,
                                                  size_t count, ReduceOp op) {
-    if (!initialized_) {
-        return nullptr;
-    }
-    detail::throwIfAborted(state_.get(), "submit");
+    requireSubmittable();
 
     auto req = std::make_shared<NCCLRequest>();
 
@@ -338,58 +342,67 @@ std::shared_ptr<NCCLRequest> NCCLComm::allreduce(const T* sendbuf, T* recvbuf,
 
 namespace detail {
 
-// Scratch for an emulated reduction, owned by the request via setScratch():
-//   hsend   — a stable host copy of the caller's by-value input (the async
-//             H2D copy reads from here, so it must outlive the call, not the
-//             stack parameter).
-//   d_send/d_recv — device send/gather buffers, freed in the destructor when
-//             the request (and thus this scratch) is released.
-//   host    — gathered values copied back for the host-side reduce.
+// Scratch for an emulated reduction, owned by the request via setScratch() and
+// freed when the request (and thus this scratch) is released:
+//   dev  — device buffer of 1 + nranks elements: [0] is this rank's value (the
+//          gather's send side), [1..] receives everyone's values.
+//   host — the same layout on the host, *page-locked*. The copies to and from
+//          it are enqueued behind NCCL work on the stream; with pageable
+//          memory cudaMemcpyAsync would block inside the submitting call until
+//          that work finished, bypassing the request's polled wait (and its
+//          failure detection) altogether.
 template<typename T>
 struct GatherScratch {
-    T  hsend{};
-    T* d_send = nullptr;
-    T* d_recv = nullptr;
-    std::vector<T> host;
+    T* dev  = nullptr;
+    T* host = nullptr;
     ~GatherScratch() {
-        cudaFree(d_send);
-        cudaFree(d_recv);
+        cudaFree(dev);
+        cudaFreeHost(host);
     }
+    const T* gathered() const { return host + 1; }
 };
 
 }  // namespace detail
 
 template<typename T>
-std::shared_ptr<NCCLRequest> NCCLComm::allreduceMaxloc(T value, std::pair<T, int>* out) {
-    if (!initialized_) {
-        return nullptr;
+std::shared_ptr<detail::GatherScratch<T>> NCCLComm::enqueueGather(T value, const char* what) {
+    requireSubmittable();
+    if (in_group_) {
+        throw std::logic_error(std::string("stComm NCCL: ") + what +
+                               " cannot be issued inside groupStart()/groupEnd()");
     }
-    detail::throwIfAborted(state_.get(), "submit");
 
-    // Stage the scalar on the host, gather everyone's value over NCCL, and copy
-    // the result back — all enqueued on the internal stream. The scratch keeps
-    // these buffers alive until the request completes (see request.h).
     auto s = std::make_shared<detail::GatherScratch<T>>();
-    s->hsend = value;
     const auto nranks = static_cast<size_t>(size_);
-    s->host.resize(nranks);
-    STCOMM_CUDA_CHECK(cudaMalloc(&s->d_send, sizeof(T)));
-    STCOMM_CUDA_CHECK(cudaMalloc(&s->d_recv, nranks * sizeof(T)));
+    const size_t bytes = (1 + nranks) * sizeof(T);
+    STCOMM_CUDA_CHECK(cudaMalloc(&s->dev, bytes));
+    STCOMM_CUDA_CHECK(cudaMallocHost(&s->host, bytes));
+    s->host[0] = value;
 
-    STCOMM_CUDA_CHECK(cudaMemcpyAsync(s->d_send, &s->hsend, sizeof(T), cudaMemcpyHostToDevice, stream_));
-    STCOMM_NCCL_CHECK(ncclAllGather(s->d_send, s->d_recv, 1, NCCLTypeMap<T>::type(), comm_, stream_));
-    STCOMM_CUDA_CHECK(cudaMemcpyAsync(s->host.data(), s->d_recv, nranks * sizeof(T),
+    STCOMM_CUDA_CHECK(cudaMemcpyAsync(s->dev, s->host, sizeof(T),
+                                      cudaMemcpyHostToDevice, stream_));
+    STCOMM_NCCL_CHECK(ncclAllGather(s->dev, s->dev + 1, 1, NCCLTypeMap<T>::type(),
+                                    comm_, stream_));
+    STCOMM_CUDA_CHECK(cudaMemcpyAsync(s->host + 1, s->dev + 1, nranks * sizeof(T),
                                       cudaMemcpyDeviceToHost, stream_));
+    return s;
+}
+
+template<typename T>
+std::shared_ptr<NCCLRequest> NCCLComm::allreduceMaxloc(T value, std::pair<T, int>* out) {
+    auto s = enqueueGather(value, "allreduceMaxloc");
+    const auto nranks = static_cast<size_t>(size_);
 
     auto req = std::make_shared<NCCLRequest>();
     req->setScratch(s);
     // Runs once after the stream drains: argmax over the gathered values. Ties
     // go to the smaller rank (strict >), matching MPI_MAXLOC semantics.
     req->setFinalizer([s, out, nranks]() {
+        const T* v = s->gathered();
         size_t best = 0;
         for (size_t i = 1; i < nranks; ++i)
-            if (s->host[i] > s->host[best]) best = i;
-        *out = { s->host[best], static_cast<int>(best) };
+            if (v[i] > v[best]) best = i;
+        *out = { v[best], static_cast<int>(best) };
     });
     recordOrDefer(req);
     return req;
@@ -397,23 +410,8 @@ std::shared_ptr<NCCLRequest> NCCLComm::allreduceMaxloc(T value, std::pair<T, int
 
 template<typename T>
 std::shared_ptr<NCCLRequest> NCCLComm::exscan(T value, T* out, ReduceOp op) {
-    if (!initialized_) {
-        return nullptr;
-    }
-    detail::throwIfAborted(state_.get(), "submit");
-
     // Same gather as allreduceMaxloc; the difference is the host-side reduce.
-    auto s = std::make_shared<detail::GatherScratch<T>>();
-    s->hsend = value;
-    const auto nranks = static_cast<size_t>(size_);
-    s->host.resize(nranks);
-    STCOMM_CUDA_CHECK(cudaMalloc(&s->d_send, sizeof(T)));
-    STCOMM_CUDA_CHECK(cudaMalloc(&s->d_recv, nranks * sizeof(T)));
-
-    STCOMM_CUDA_CHECK(cudaMemcpyAsync(s->d_send, &s->hsend, sizeof(T), cudaMemcpyHostToDevice, stream_));
-    STCOMM_NCCL_CHECK(ncclAllGather(s->d_send, s->d_recv, 1, NCCLTypeMap<T>::type(), comm_, stream_));
-    STCOMM_CUDA_CHECK(cudaMemcpyAsync(s->host.data(), s->d_recv, nranks * sizeof(T),
-                                      cudaMemcpyDeviceToHost, stream_));
+    auto s = enqueueGather(value, "exscan");
 
     auto req = std::make_shared<NCCLRequest>();
     req->setScratch(s);
@@ -423,9 +421,10 @@ std::shared_ptr<NCCLRequest> NCCLComm::exscan(T value, T* out, ReduceOp op) {
     // undefined).
     req->setFinalizer([s, out, op, rank]() {
         if (rank == 0) { *out = T{}; return; }
-        T acc = s->host[0];
+        const T* v = s->gathered();
+        T acc = v[0];
         for (size_t i = 1; i < rank; ++i)
-            acc = detail::apply_reduce(op, acc, s->host[i]);
+            acc = detail::apply_reduce(op, acc, v[i]);
         *out = acc;
     });
     recordOrDefer(req);

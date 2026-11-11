@@ -42,46 +42,98 @@ template<> inline MPI_Datatype mpi_pair_datatype<short>()       { return MPI_SHO
 template<> inline MPI_Datatype mpi_pair_datatype<long double>() { return MPI_LONG_DOUBLE_INT; }
 
 // MPI's predefined MAXLOC pair types only cover {int, short, long, float, double,
-// long double} paired with `int`. For 64-bit integers we cast through `long`
-// (LP64: long == int64_t). For unsigned 64-bit we still go through `long` but
-// must check the input is non-negative if signedness matters.
+// long double} paired with `int`, so 64-bit integers travel as `long` (LP64:
+// long == int64_t). Unsigned 64-bit values cannot simply be cast — anything
+// >= 2^63 would turn negative and lose the comparison — so they are biased by
+// 2^63 (top bit flipped), which maps the unsigned order onto the signed order
+// exactly; maxloc_decode undoes it.
 template<typename T> struct maxloc_value_cast      { using type = T;    };
 template<>           struct maxloc_value_cast<long long>          { using type = long; };
 template<>           struct maxloc_value_cast<unsigned long>      { using type = long; };
 template<>           struct maxloc_value_cast<unsigned long long> { using type = long; };
 
-// The v-collectives move MPI_BYTE with int counts and int displacements, so
-// an element count × sizeof(T) past INT_MAX would wrap into a wrong-size or
-// negative transfer with no error. Compute in int64 and refuse instead.
-inline int checkedBytes(std::int64_t elems, std::size_t elem_size, const char* op) {
-    const std::int64_t bytes = elems * static_cast<std::int64_t>(elem_size);
-    if (elems < 0 || bytes > INT_MAX) {
-        throw std::overflow_error(std::string("stComm MPI ") + op + ": " +
-                                  std::to_string(elems) + " elements × " +
-                                  std::to_string(elem_size) + " B is outside the int "
-                                  "byte-count range (max INT_MAX bytes per count/offset)");
+template<typename T>
+constexpr bool maxloc_is_biased =
+    std::is_integral<T>::value && std::is_unsigned<T>::value &&
+    !std::is_same<typename maxloc_value_cast<T>::type, T>::value;
+
+constexpr unsigned long kMaxlocBias = 1UL << 63;
+
+template<typename T>
+inline typename maxloc_value_cast<T>::type maxloc_encode(T v) {
+    using M = typename maxloc_value_cast<T>::type;
+    if constexpr (maxloc_is_biased<T>) {
+        static_assert(sizeof(T) == 8 && sizeof(long) == 8, "LP64 assumed");
+        return static_cast<M>(static_cast<unsigned long>(v) ^ kMaxlocBias);
+    } else {
+        static_assert(sizeof(M) >= sizeof(T), "MAXLOC wire type narrower than T");
+        return static_cast<M>(v);
     }
-    return static_cast<int>(bytes);
 }
 
-// Per-rank byte counts + displacements for one side of a v-collective. MPI may
-// read these arrays until the non-blocking call completes, so they live in the
-// request's scratch (MPIRequest::setScratch), not on this function's stack.
-struct ByteLayout {
+template<typename T>
+inline T maxloc_decode(typename maxloc_value_cast<T>::type m) {
+    if constexpr (maxloc_is_biased<T>) {
+        return static_cast<T>(static_cast<unsigned long>(m) ^ kMaxlocBias);
+    } else {
+        return static_cast<T>(m);
+    }
+}
+
+// The v-collectives describe one element as a contiguous run of sizeof(T)
+// bytes, so MPI's int counts and displacements are in *elements*: the limit is
+// INT_MAX elements per rank-side (16 GiB of 8-byte values), not INT_MAX bytes.
+// Freed on scope exit — MPI keeps a datatype alive for operations still using
+// it, so the non-blocking call may outlive this object.
+class ElemType {
+public:
+    explicit ElemType(std::size_t elem_size) {
+        if (elem_size == 1) return;  // MPI_BYTE itself
+        if (elem_size > static_cast<std::size_t>(INT_MAX)) {
+            throw std::overflow_error("stComm MPI: element size exceeds INT_MAX bytes");
+        }
+        STCOMM_MPI_CHECK(MPI_Type_contiguous(static_cast<int>(elem_size), MPI_BYTE, &type_));
+        owned_ = true;
+        STCOMM_MPI_CHECK(MPI_Type_commit(&type_));
+    }
+    ~ElemType() {
+        if (owned_) MPI_Type_free(&type_);  // must not throw
+    }
+    ElemType(const ElemType&)            = delete;
+    ElemType& operator=(const ElemType&) = delete;
+
+    MPI_Datatype get() const { return type_; }
+
+private:
+    MPI_Datatype type_  = MPI_BYTE;
+    bool         owned_ = false;
+};
+
+// Per-rank element counts + displacements for one side of a v-collective. MPI
+// may read these arrays until the non-blocking call completes, so they live in
+// the request's scratch (MPIRequest::setScratch), not on the caller's stack.
+struct ElemLayout {
     std::vector<int> counts;
     std::vector<int> displs;
 };
 
-inline ByteLayout byteLayout(const int* counts, int nranks, std::size_t elem_size,
-                             const char* op) {
+// Offsets are accumulated in int64 and refused past INT_MAX: an int running
+// sum would wrap into a negative displacement with no error.
+inline ElemLayout elemLayout(const int* counts, int nranks, const char* op) {
     const auto n = static_cast<std::size_t>(nranks);
-    ByteLayout l;
-    l.counts.resize(n);
+    ElemLayout l;
+    l.counts.assign(counts, counts + n);
     l.displs.resize(n);
-    std::int64_t offset = 0;  // in elements
+    std::int64_t offset = 0;
     for (std::size_t i = 0; i < n; ++i) {
-        l.displs[i] = checkedBytes(offset, elem_size, op);
-        l.counts[i] = checkedBytes(counts[i], elem_size, op);
+        if (counts[i] < 0 || offset > INT_MAX) {
+            throw std::overflow_error(
+                std::string("stComm MPI ") + op + ": rank " + std::to_string(i) +
+                " has count " + std::to_string(counts[i]) + " at element offset " +
+                std::to_string(offset) + " — counts must be >= 0 and offsets "
+                "must fit in int (max INT_MAX elements per side)");
+        }
+        l.displs[i] = static_cast<int>(offset);
         offset += counts[i];
     }
     return l;
@@ -92,8 +144,8 @@ inline ByteLayout byteLayout(const int* counts, int nranks, std::size_t elem_siz
 /**
  * @brief MPI-based communication backend for CPU
  *
- * Implements communication using MPI for host memory.
- * Uses MPI_BYTE to handle arbitrary data sizes efficiently.
+ * Implements communication using MPI for host memory. Data movers ship raw
+ * bytes (any trivially copyable T); reductions use the real MPI datatype.
  */
 class MPIComm {
 public:
@@ -124,8 +176,10 @@ public:
     template<typename T>
     std::shared_ptr<MPIRequest> recv(T* data, size_t count, int source, int tag = 0);
 
-    // Collective communication - with auto displacement
-    // Automatically handles large data (>2GB) by chunking
+    // Collective communication - with auto displacement. Counts are int
+    // elements; each side may total up to INT_MAX elements (not bytes), and a
+    // layout past that throws std::overflow_error before any MPI call. Every
+    // rank must be given a layout that fits, or the collective desynchronises.
     template<typename T>
     std::shared_ptr<MPIRequest> allgatherv(const T* sendbuf, int sendcount,
                          T* recvbuf, const int* recvcounts);
@@ -167,7 +221,8 @@ public:
     // movers above, a reduction needs the real datatype so MPI applies `op`
     // element-wise. Caller-owned buffers must outlive the returned request.
     // Chunked so each MPI call stays under INT_MAX elements (reductions are
-    // element-wise, so chunking is safe).
+    // element-wise, so chunking is safe). In-place is allowed
+    // (sendbuf == recvbuf, mapped to MPI_IN_PLACE).
     template<typename T>
     std::shared_ptr<MPIRequest> allreduce(const T* sendbuf, T* recvbuf,
                                           size_t count, MPI_Op op = MPI_SUM);
@@ -253,13 +308,15 @@ std::shared_ptr<MPIRequest> MPIComm::allgatherv(const T* sendbuf, int sendcount,
 
     auto req = std::make_shared<MPIRequest>();
 
-    // Byte counts/displacements (auto displacement), range-checked.
-    const int send_bytes = detail::checkedBytes(sendcount, sizeof(T), "allgatherv");
-    auto recv = std::make_shared<detail::ByteLayout>(
-        detail::byteLayout(recvcounts, size_, sizeof(T), "allgatherv"));
+    if (sendcount < 0) {
+        throw std::overflow_error("stComm MPI allgatherv: negative sendcount");
+    }
+    auto recv = std::make_shared<detail::ElemLayout>(
+        detail::elemLayout(recvcounts, size_, "allgatherv"));
+    const detail::ElemType elem(sizeof(T));
 
-    STCOMM_MPI_CHECK(MPI_Iallgatherv(sendbuf, send_bytes, MPI_BYTE,
-                    recvbuf, recv->counts.data(), recv->displs.data(), MPI_BYTE,
+    STCOMM_MPI_CHECK(MPI_Iallgatherv(sendbuf, sendcount, elem.get(),
+                    recvbuf, recv->counts.data(), recv->displs.data(), elem.get(),
                     comm_, &req->getHandle()));
     req->setScratch(recv);  // arrays must outlive the non-blocking call
 
@@ -274,17 +331,18 @@ std::shared_ptr<MPIRequest> MPIComm::alltoallv(const T* sendbuf, const int* send
 
     auto req = std::make_shared<MPIRequest>();
 
-    // Byte counts/displacements for both sides (auto displacement),
+    // Element counts/displacements for both sides (auto displacement),
     // range-checked.
-    using Layouts = std::pair<detail::ByteLayout, detail::ByteLayout>;
+    using Layouts = std::pair<detail::ElemLayout, detail::ElemLayout>;
     auto layouts = std::make_shared<Layouts>(
-        detail::byteLayout(sendcounts, size_, sizeof(T), "alltoallv"),
-        detail::byteLayout(recvcounts, size_, sizeof(T), "alltoallv"));
-    const detail::ByteLayout& snd = layouts->first;
-    const detail::ByteLayout& rcv = layouts->second;
+        detail::elemLayout(sendcounts, size_, "alltoallv"),
+        detail::elemLayout(recvcounts, size_, "alltoallv"));
+    const detail::ElemLayout& snd = layouts->first;
+    const detail::ElemLayout& rcv = layouts->second;
+    const detail::ElemType elem(sizeof(T));
 
-    STCOMM_MPI_CHECK(MPI_Ialltoallv(sendbuf, snd.counts.data(), snd.displs.data(), MPI_BYTE,
-                   recvbuf, rcv.counts.data(), rcv.displs.data(), MPI_BYTE,
+    STCOMM_MPI_CHECK(MPI_Ialltoallv(sendbuf, snd.counts.data(), snd.displs.data(), elem.get(),
+                   recvbuf, rcv.counts.data(), rcv.displs.data(), elem.get(),
                    comm_, &req->getHandle()));
     req->setScratch(layouts);  // arrays must outlive the non-blocking call
 
@@ -323,12 +381,12 @@ std::pair<T, int> MPIComm::allreduceMaxloc(T value) {
     // Pack (value cast to a MPI-supported pair value type, rank).
     using MPIValue = typename detail::maxloc_value_cast<T>::type;
     struct Pair { MPIValue value; int rank; };
-    Pair local{static_cast<MPIValue>(value), rank_};
+    Pair local{detail::maxloc_encode<T>(value), rank_};
     Pair global{};
     STCOMM_MPI_CHECK(MPI_Allreduce(&local, &global, 1,
                   detail::mpi_pair_datatype<MPIValue>(),
                   MPI_MAXLOC, comm_));
-    return { static_cast<T>(global.value), global.rank };
+    return { detail::maxloc_decode<T>(global.value), global.rank };
 }
 
 template<typename T>
@@ -346,7 +404,7 @@ std::shared_ptr<MPIRequest> MPIComm::allreduceMaxloc(T value, std::pair<T, int>*
     // Buffers must outlive the non-blocking call; the request owns them.
     struct Buf { Pair local; Pair global; };
     auto buf = std::make_shared<Buf>();
-    buf->local = Pair{static_cast<MPIValue>(value), rank_};
+    buf->local = Pair{detail::maxloc_encode<T>(value), rank_};
 
     auto req = std::make_shared<MPIRequest>();
     STCOMM_MPI_CHECK(MPI_Iallreduce(&buf->local, &buf->global, 1,
@@ -354,7 +412,7 @@ std::shared_ptr<MPIRequest> MPIComm::allreduceMaxloc(T value, std::pair<T, int>*
                    comm_, &req->addHandle()));
     req->setScratch(buf);
     req->setFinalizer([buf, out]() {
-        *out = { static_cast<T>(buf->global.value), buf->global.rank };
+        *out = { detail::maxloc_decode<T>(buf->global.value), buf->global.rank };
     });
     return req;
 }
@@ -366,13 +424,18 @@ std::shared_ptr<MPIRequest> MPIComm::allreduce(const T* sendbuf, T* recvbuf,
                   "Type must be trivially copyable for MPI communication");
 
     const size_t MAX_CHUNK_ELEMS = static_cast<size_t>(INT_MAX);
+    // MPI forbids aliased send/recv buffers; in-place must be spelled
+    // MPI_IN_PLACE (the input is then read from recvbuf).
+    const bool in_place = recvbuf != nullptr && sendbuf == recvbuf;
     auto req = std::make_shared<MPIRequest>();
     size_t offset = 0;
     // do-while so count == 0 still issues one (legal) zero-count collective,
     // keeping every rank's collective sequence matched.
     do {
         const size_t chunk = std::min(MAX_CHUNK_ELEMS, count - offset);
-        STCOMM_MPI_CHECK(MPI_Iallreduce(sendbuf + offset, recvbuf + offset,
+        const void* src = in_place ? MPI_IN_PLACE
+                                   : static_cast<const void*>(sendbuf + offset);
+        STCOMM_MPI_CHECK(MPI_Iallreduce(src, recvbuf + offset,
                        static_cast<int>(chunk), detail::mpi_datatype<T>(), op,
                        comm_, &req->addHandle()));
         offset += chunk;

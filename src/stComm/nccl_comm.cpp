@@ -1,5 +1,9 @@
 #include "stComm/nccl_comm.h"
+#include <cstddef>
+#include <exception>
 #include <stdexcept>
+#include <string>
+#include <vector>
 
 namespace stComm {
 
@@ -42,7 +46,8 @@ void NCCLComm::initialize(int rank, int nranks, int device_id, ncclUniqueId comm
 
 ncclUniqueId NCCLComm::getUniqueId() {
     ncclUniqueId id;
-    ncclGetUniqueId(&id);
+    // Checked: an unset id broadcast to every rank fails far from the cause.
+    STCOMM_NCCL_CHECK(ncclGetUniqueId(&id));
     return id;
 }
 
@@ -62,14 +67,30 @@ void NCCLComm::groupStart() {
 }
 
 void NCCLComm::groupEnd() {
-    STCOMM_NCCL_CHECK(ncclGroupEnd());
+    const ncclResult_t res = ncclGroupEnd();
+    // The group is over whether or not the flush worked: leaving in_group_ set
+    // would park every later request forever, and an unrecorded request
+    // reports success without having run.
     in_group_ = false;
+    std::vector<std::shared_ptr<NCCLRequest>> pending;
+    pending.swap(pending_records_);
+
+    if (res != ncclSuccess) {
+        const std::string why = std::string("ncclGroupEnd failed: ") + ncclGetErrorString(res);
+        for (auto& req : pending) req->fail(why);
+        detail::throwNccl(res, "ncclGroupEnd()", __FILE__, __LINE__);
+    }
+
     // The grouped ops are only now on the stream; record every parked request's
     // event at this single completion point (they all complete together).
-    for (auto& req : pending_records_) {
-        req->record(stream_, state_);
+    for (std::size_t i = 0; i < pending.size(); ++i) {
+        try {
+            pending[i]->record(stream_, state_);
+        } catch (const std::exception& e) {
+            for (std::size_t j = i; j < pending.size(); ++j) pending[j]->fail(e.what());
+            throw;
+        }
     }
-    pending_records_.clear();
 }
 
 void NCCLComm::recordOrDefer(const std::shared_ptr<NCCLRequest>& req) {

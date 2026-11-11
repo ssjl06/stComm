@@ -424,18 +424,101 @@ TEST_F(MPICommTest, AlltoallvVariableCounts) {
 // Async Operation Tests
 // ============================================================================
 
-// The v-collectives move MPI_BYTE with int counts: an element count whose
-// byte size passes INT_MAX used to wrap silently into a wrong-size transfer.
-// Every rank passes the same oversized counts, so all throw before any MPI
-// call (no buffers are touched — nullptr is fine).
-TEST_F(MPICommTest, VCollectivesRejectByteCountOverflow) {
-    std::vector<int> counts(uz(size), INT_MAX / 4);  // × 8 B per int64 > INT_MAX
-    EXPECT_THROW(comm->alltoallv<std::int64_t>(nullptr, counts.data(),
-                                               nullptr, counts.data()),
+// The v-collectives take int element counts and int element displacements. A
+// layout outside that range must throw before any MPI call rather than wrap
+// into a wrong-size transfer. Every rank passes the same bad counts, so all
+// throw together (no buffers are touched — nullptr is fine).
+TEST_F(MPICommTest, VCollectivesRejectBadLayout) {
+    std::vector<int> negative(uz(size), -1);
+    EXPECT_THROW(comm->alltoallv<std::int64_t>(nullptr, negative.data(),
+                                               nullptr, negative.data()),
                  std::overflow_error);
-    EXPECT_THROW(comm->allgatherv<std::int64_t>(nullptr, counts[0],
-                                                nullptr, counts.data()),
+    EXPECT_THROW(comm->allgatherv<std::int64_t>(nullptr, 0,
+                                                nullptr, negative.data()),
                  std::overflow_error);
+
+    if (size < 3) return;  // an element offset past INT_MAX needs a third rank
+    std::vector<int> huge(uz(size), INT_MAX);
+    EXPECT_THROW(comm->alltoallv<std::int64_t>(nullptr, huge.data(),
+                                               nullptr, huge.data()),
+                 std::overflow_error);
+    EXPECT_THROW(comm->allgatherv<std::int64_t>(nullptr, 0,
+                                                nullptr, huge.data()),
+                 std::overflow_error);
+}
+
+// Elements wider than a primitive travel as one contiguous-bytes datatype with
+// element counts (not as sizeof(T)-scaled byte counts).
+TEST_F(MPICommTest, AlltoallvStructElements) {
+    struct Rec { std::int64_t id; double w; std::int32_t tag; };
+    const int per = 3;
+    std::vector<int> counts(uz(size), per);
+    std::vector<Rec> send(uz(size * per)), recv(uz(size * per));
+    for (int j = 0; j < size; ++j)
+        for (int k = 0; k < per; ++k)
+            send[uz(j * per + k)] = Rec{rank * 100 + j, 0.5 * k, k};
+
+    comm->alltoallv(send.data(), counts.data(), recv.data(), counts.data())->wait();
+
+    for (int i = 0; i < size; ++i)
+        for (int k = 0; k < per; ++k) {
+            const Rec& r = recv[uz(i * per + k)];
+            EXPECT_EQ(r.id, i * 100 + rank);
+            EXPECT_DOUBLE_EQ(r.w, 0.5 * k);
+            EXPECT_EQ(r.tag, k);
+        }
+}
+
+// Unsigned 64-bit MAXLOC must compare as unsigned: a value >= 2^63 used to be
+// cast to a negative long and lose to any small value.
+TEST_F(MPICommTest, AllreduceMaxlocUnsigned64) {
+    const std::uint64_t big = 0x8000000000000001ULL;
+    const std::uint64_t mine = (rank == 0) ? big : 5ULL;
+
+    const auto blocking = comm->allreduceMaxloc(mine);
+    EXPECT_EQ(blocking.first, big);
+    EXPECT_EQ(blocking.second, 0);
+
+    std::pair<std::uint64_t, int> async{0, -1};
+    comm->allreduceMaxloc(mine, &async)->wait();
+    EXPECT_EQ(async.first, big);
+    EXPECT_EQ(async.second, 0);
+
+    // Signed 64-bit keeps its own order (negative stays below positive).
+    const std::int64_t smine = (rank == 0) ? std::int64_t{7} : std::int64_t{-9};
+    const auto s = comm->allreduceMaxloc(smine);
+    EXPECT_EQ(s.first, 7);
+    EXPECT_EQ(s.second, 0);
+}
+
+TEST_F(MPICommTest, AllreduceInPlace) {
+    const int n = 4;
+    std::vector<std::int64_t> buf(uz(n));
+    for (int i = 0; i < n; ++i) buf[uz(i)] = rank + i;
+
+    comm->allreduce(buf.data(), buf.data(), uz(n), MPI_SUM)->wait();
+
+    for (int i = 0; i < n; ++i) {
+        EXPECT_EQ(buf[uz(i)], static_cast<std::int64_t>(size) * (size - 1) / 2 +
+                              static_cast<std::int64_t>(size) * i);
+    }
+}
+
+// A request dropped without wait() must still let the collective finish (the
+// destructor waits) instead of freeing the arrays MPI is reading.
+TEST_F(MPICommTest, DroppedRequestStillCompletes) {
+    const int per = 2;
+    std::vector<int> counts(uz(size), per);
+    std::vector<int> send(uz(per), rank), recv(uz(size * per), -1);
+
+    comm->allgatherv(send.data(), per, recv.data(), counts.data());  // dropped
+
+    for (int i = 0; i < size; ++i)
+        for (int k = 0; k < per; ++k) EXPECT_EQ(recv[uz(i * per + k)], i);
+
+    std::int64_t out = -1;
+    comm->exscan(std::int64_t{1}, &out);  // dropped: finalizer must not run
+    EXPECT_EQ(out, -1);
 }
 
 TEST(UtilsTest, DisplacementOverflowThrows) {

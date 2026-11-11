@@ -248,3 +248,23 @@ TEST_F(CommFacadeTest, AllreduceDevice) {
     cudaFree(dsend);
     cudaFree(drecv);
 }
+
+// A Device-space call on a host-only Comm must throw (it used to be an assert,
+// i.e. a null dereference in release builds).
+TEST_F(CommFacadeTest, DeviceCallOnHostOnlyCommThrows) {
+    Comm comm;
+    ASSERT_FALSE(comm.hasDevice());
+    int* buf = nullptr;
+    EXPECT_THROW(comm.nccl(), std::logic_error);
+    EXPECT_THROW(comm.bcast<Space::Device>(buf, 1, 0), std::logic_error);
+    EXPECT_THROW(comm.allreduce<Space::Device>(buf, buf, 1), std::logic_error);
+}
+
+// In-place allreduce is part of the facade contract on both Spaces.
+TEST_F(CommFacadeTest, AllreduceInPlaceHost) {
+    Comm comm;
+    std::vector<long> buf{static_cast<long>(rank), static_cast<long>(rank) + 1};
+    comm.allreduce<Space::Host>(buf.data(), buf.data(), buf.size(), ReduceOp::Max)->wait();
+    EXPECT_EQ(buf[0], static_cast<long>(size - 1));
+    EXPECT_EQ(buf[1], static_cast<long>(size));
+}
