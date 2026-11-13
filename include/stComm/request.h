@@ -62,9 +62,15 @@ protected:
  * arrays (and the caller's buffers), and a non-blocking collective can neither
  * be cancelled nor freed. So the destructor waits for it — the caller's buffers
  * must stay valid until the request is gone, as with any non-blocking MPI call.
+ *
  * The one exception is stack unwinding: blocking there could hang a rank that
- * is trying to report an error, so the scratch is leaked instead (MPI may keep
- * using it safely) and the exception carries on.
+ * is trying to report an error. The same unwinding is about to free the
+ * caller's buffers, so pending receives are cancelled first — a cancelled
+ * receive completes at once and can no longer write into them. Whatever else
+ * is still in flight (sends, non-blocking collectives) cannot be cancelled;
+ * its scratch is leaked so MPI may keep reading it, and the exception carries
+ * on. Bounding a wait is the caller's job, before the request is dropped —
+ * the destructor has no way to report a timeout.
  */
 class MPIRequest : public Request {
 public:
@@ -77,6 +83,13 @@ public:
         MPI_Finalized(&finalized);
         if (!initialized || finalized) return;
         if (std::uncaught_exceptions() > 0) {
+            // MPI guarantees a wait on a cancelled request returns, whether the
+            // cancel won or the message had already arrived.
+            for (std::size_t slot : recv_slots_) {
+                if (handles_[slot] == MPI_REQUEST_NULL) continue;
+                (void)MPI_Cancel(&handles_[slot]);
+                (void)MPI_Wait(&handles_[slot], MPI_STATUS_IGNORE);
+            }
             // Deliberate leak: keeps the arrays MPI may still read alive.
             (void)new std::shared_ptr<void>(std::move(scratch_));
             return;
@@ -94,6 +107,13 @@ public:
     MPI_Request& addHandle() {
         handles_.push_back(MPI_REQUEST_NULL);
         return handles_.back();
+    }
+
+    /// @brief Same, for a point-to-point receive: the one kind of operation
+    /// that writes into caller memory and can still be cancelled.
+    MPI_Request& addRecvHandle() {
+        recv_slots_.push_back(handles_.size());
+        return addHandle();
     }
 
     /// @brief Attach an already-issued MPI_Request.
@@ -140,6 +160,7 @@ private:
     }
 
     std::vector<MPI_Request> handles_;
+    std::vector<std::size_t> recv_slots_;  // indices of handles_ that are receives
     std::shared_ptr<void>    scratch_;
     std::function<void()>    finalizer_;
     Status                   status_;

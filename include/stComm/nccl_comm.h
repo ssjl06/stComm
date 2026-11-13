@@ -268,6 +268,12 @@ std::shared_ptr<NCCLRequest> NCCLComm::allgatherv(const T* sendbuf, size_t sendc
     ncclDataType_t nccl_type = NCCLTypeMap<T>::type();
     const auto nranks = static_cast<size_t>(size_);
     const auto me     = static_cast<size_t>(rank_);
+    // The self block is copied with sendcount: a smaller slot would be overrun.
+    if (recvcounts[me] != sendcount) {
+        throw std::invalid_argument(
+            "stComm NCCL allgatherv: this rank sends " + std::to_string(sendcount) +
+            " elements but expects " + std::to_string(recvcounts[me]) + " from itself");
+    }
 
     // NCCL doesn't have native allgatherv, use grouped send/recv. Offsets are
     // plain pointer arithmetic, so there is no int displacement limit.
@@ -310,6 +316,11 @@ std::shared_ptr<NCCLRequest> NCCLComm::alltoallv(const T* sendbuf, const size_t*
     ncclDataType_t nccl_type = NCCLTypeMap<T>::type();
     const auto nranks = static_cast<size_t>(size_);
     const auto me     = static_cast<size_t>(rank_);
+    if (sendcounts[me] != recvcounts[me]) {
+        throw std::invalid_argument(
+            "stComm NCCL alltoallv: this rank sends itself " + std::to_string(sendcounts[me]) +
+            " elements but expects " + std::to_string(recvcounts[me]));
+    }
 
     // NCCL doesn't have native alltoallv, use grouped send/recv. Offsets are
     // plain pointer arithmetic, so there is no int displacement limit.
