@@ -152,8 +152,17 @@ inline std::size_t& p2pChunkBytes() {
 }
 
 // Tag reserved for that point-to-point traffic (within MPI's guaranteed tag
-// range). User send()/recv() must not use it.
+// range). It shares the communicator with user send()/recv(), which therefore
+// refuse it: a user message under this tag could be matched by a collective's
+// chunk receive, or swallow one of its chunks.
 constexpr int kLargeCollectiveTag = 32765;
+
+inline void rejectReservedTag(int tag) {
+    if (tag == kLargeCollectiveTag) {
+        throw std::invalid_argument("stComm MPI: tag " + std::to_string(tag) +
+                                    " is reserved for the size_t-count collectives");
+    }
+}
 
 } // namespace detail
 
@@ -285,6 +294,7 @@ template<typename T>
 std::shared_ptr<MPIRequest> MPIComm::send(const T* data, size_t count, int dest, int tag) {
     static_assert(std::is_trivially_copyable<T>::value,
                   "Type must be trivially copyable for MPI communication");
+    detail::rejectReservedTag(tag);
 
     const size_t total_bytes = count * sizeof(T);
     const size_t MAX_CHUNK_SIZE = 1073741824;  // 1GB per chunk
@@ -315,6 +325,7 @@ template<typename T>
 std::shared_ptr<MPIRequest> MPIComm::recv(T* data, size_t count, int source, int tag) {
     static_assert(std::is_trivially_copyable<T>::value,
                   "Type must be trivially copyable for MPI communication");
+    detail::rejectReservedTag(tag);
 
     const size_t total_bytes = count * sizeof(T);
     const size_t MAX_CHUNK_SIZE = 1073741824;  // 1GB per chunk
@@ -323,7 +334,7 @@ std::shared_ptr<MPIRequest> MPIComm::recv(T* data, size_t count, int source, int
     if (total_bytes <= static_cast<size_t>(INT_MAX)) {
         // Small data: single MPI call
         auto req = std::make_shared<MPIRequest>();
-        STCOMM_MPI_CHECK(MPI_Irecv(data, static_cast<int>(total_bytes), MPI_BYTE, source, tag, comm_, &req->getHandle()));
+        STCOMM_MPI_CHECK(MPI_Irecv(data, static_cast<int>(total_bytes), MPI_BYTE, source, tag, comm_, &req->addRecvHandle()));
         return req;
     }
 
@@ -334,7 +345,7 @@ std::shared_ptr<MPIRequest> MPIComm::recv(T* data, size_t count, int source, int
 
     while (offset < total_bytes) {
         size_t chunk_size = std::min(MAX_CHUNK_SIZE, total_bytes - offset);
-        STCOMM_MPI_CHECK(MPI_Irecv(byte_data + offset, static_cast<int>(chunk_size), MPI_BYTE, source, tag, comm_, &req->addHandle()));
+        STCOMM_MPI_CHECK(MPI_Irecv(byte_data + offset, static_cast<int>(chunk_size), MPI_BYTE, source, tag, comm_, &req->addRecvHandle()));
         offset += chunk_size;
     }
 
@@ -411,7 +422,7 @@ inline void MPIComm::irecvBytes(MPIRequest& req, void* data, std::size_t nbytes,
     for (std::size_t off = 0; off < nbytes;) {
         const std::size_t chunk = std::min(chunk_max, nbytes - off);
         STCOMM_MPI_CHECK(MPI_Irecv(bytes + off, static_cast<int>(chunk), MPI_BYTE, source,
-                                   detail::kLargeCollectiveTag, comm_, &req.addHandle()));
+                                   detail::kLargeCollectiveTag, comm_, &req.addRecvHandle()));
         off += chunk;
     }
 }

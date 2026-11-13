@@ -281,6 +281,7 @@ int main(int argc, char** argv) {
 - `void barrier()`: Synchronization barrier
 - `send<T>(data, count, dest, tag)`: Async send
 - `recv<T>(data, count, source, tag)`: Async receive
+- Tag 32765 is reserved for the `size_t`-count collectives; `send`/`recv` reject it
 - `allgatherv<T>(sendbuf, sendcount, recvbuf, recvcounts)`: Variable-length allgather (auto displacement)
 - `alltoallv<T>(sendbuf, sendcounts, recvbuf, recvcounts)`: Variable-length alltoall (auto displacement)
 

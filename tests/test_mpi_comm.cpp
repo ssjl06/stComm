@@ -657,6 +657,42 @@ TEST_F(MPICommTest, SizeCountSelfMismatchThrows) {
                  std::invalid_argument);
 }
 
+TEST_F(MPICommTest, ReservedTagRejected) {
+    // The size_t collectives' chunk traffic shares the communicator with user
+    // point-to-point messages; their tag is off limits.
+    int value = 0;
+    EXPECT_THROW(comm->send(&value, 1, rank, stComm::detail::kLargeCollectiveTag),
+                 std::invalid_argument);
+    EXPECT_THROW(comm->recv(&value, 1, rank, stComm::detail::kLargeCollectiveTag),
+                 std::invalid_argument);
+}
+
+TEST_F(MPICommTest, UnwindingCancelsPendingReceives) {
+    // A receive dropped by stack unwinding must not stay posted: its buffer is
+    // freed by the same unwinding, and the next matching message would be
+    // written into it.
+    const int tag = 77;
+    {
+        std::vector<int> doomed(4, -1);
+        try {
+            auto pending = comm->recv(doomed.data(), doomed.size(), rank, tag);
+            throw std::runtime_error("caller gives up");
+        } catch (const std::runtime_error&) {
+        }
+        EXPECT_EQ(doomed, std::vector<int>(4, -1));
+    }
+
+    // Were the old receive still posted, it would match this message first
+    // and the fresh receive below would wait forever.
+    const std::vector<int> message(4, rank + 1);
+    std::vector<int> got(4, 0);
+    auto r = comm->recv(got.data(), got.size(), rank, tag);
+    auto s = comm->send(message.data(), message.size(), rank, tag);
+    s->wait();
+    r->wait();
+    EXPECT_EQ(got, message);
+}
+
 TEST(UtilsTest, DisplacementOverflowThrows) {
     const int counts[3] = {INT_MAX, 1, 1};  // displs[2] = INT_MAX + 1
     EXPECT_THROW(stComm::Utils::calculateDisplacements(counts, 3), std::overflow_error);

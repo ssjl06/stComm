@@ -701,6 +701,27 @@ TEST(NCCLUninitialized, SubmissionThrows) {
     EXPECT_THROW(c.allreduceMaxloc(1, &out), std::logic_error);
 }
 
+// A self count that disagrees between the send and receive side would overrun
+// the self slot; rejected before anything is enqueued. Every rank passes the
+// same bad layout, so all throw together.
+TEST_F(NCCLCommTest, SizeCountSelfMismatchThrows) {
+    std::vector<std::size_t> sendcounts(static_cast<std::size_t>(size), 0);
+    std::vector<std::size_t> recvcounts(static_cast<std::size_t>(size), 0);
+    sendcounts[static_cast<std::size_t>(rank)] = 2;
+    recvcounts[static_cast<std::size_t>(rank)] = 1;
+
+    std::int64_t* d_buf = nullptr;
+    ASSERT_EQ(cudaMalloc(&d_buf, 4 * sizeof(std::int64_t)), cudaSuccess);
+    EXPECT_THROW(nccl_comm->alltoallv(d_buf, sendcounts.data(), d_buf + 2, recvcounts.data()),
+                 std::invalid_argument);
+    EXPECT_THROW(nccl_comm->allgatherv(d_buf, std::size_t{2}, d_buf + 2, recvcounts.data()),
+                 std::invalid_argument);
+    cudaFree(d_buf);
+
+    // The communicator is untouched by the rejected calls.
+    nccl_comm->barrier();
+}
+
 // The emulated reductions cannot run inside a user group (their gather would be
 // deferred past the copy that reads its result).
 TEST_F(NCCLCommTest, EmulatedReductionsRejectedInsideGroup) {
